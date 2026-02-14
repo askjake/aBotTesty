@@ -147,6 +147,20 @@ class ProviderDiscovery:
             return (False, None, None)
 
 
+
+# Additional helper functions for compatibility
+def get_discovery_service() -> ProviderDiscovery:
+    """Get the global discovery service instance (alias for get_discovery)"""
+    return _discovery
+
+
+async def auto_discover_providers() -> List[DiscoveredProvider]:
+    """
+    Auto-discover all available providers.
+    Convenience function that calls discovery.discover_all()
+    """
+    return await _discovery.discover_all()
+
 # Global discovery instance
 _discovery = ProviderDiscovery()
 
