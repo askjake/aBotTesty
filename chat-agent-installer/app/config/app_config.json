@@ -1,0 +1,17 @@
+{
+  "app_name": "Chat-Agent",
+  "version": "1.0.0",
+  "description": "AI-powered chat agent with frontend and backend",
+  "backend": {
+    "port": 8000,
+    "host": "0.0.0.0"
+  },
+  "frontend": {
+    "port": 3000,
+    "host": "0.0.0.0"
+  },
+  "database": {
+    "type": "postgresql",
+    "default_port": 5432
+  }
+}
