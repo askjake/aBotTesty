@@ -1,63 +1,91 @@
-# Smart Chat Agent Startup for Windows
-# PowerShell script - Run from scripts directory
+# Chat Agent Complete Startup Script for Windows
+# This script handles EVERYTHING: dependencies, env setup, and startup
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "   Smart Chat Agent Startup (Windows)   " -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
+function Write-Step {
+    param($Message)
+    Write-Host ""
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+    Write-Host $Message -ForegroundColor Yellow
+    Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor Cyan
+}
 
-# Get script directory
+function Write-Success {
+    param($Message)
+    Write-Host "✓ $Message" -ForegroundColor Green
+}
+
+function Write-Error {
+    param($Message)
+    Write-Host "✗ $Message" -ForegroundColor Red
+}
+
+Write-Host ""
+Write-Host "══════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "   Chat Agent Complete Startup (Windows)      " -ForegroundColor Cyan
+Write-Host "══════════════════════════════════════════════" -ForegroundColor Cyan
+
+# Get paths
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
-$BackendDir = Join-Path $RepoRoot "app\backend"
-$FrontendDir = Join-Path $RepoRoot "app\frontend"
+$BackendDir = Join-Path $RepoRoot "app" "backend"
+$FrontendDir = Join-Path $RepoRoot "app" "frontend"
 
-Write-Host "Directories:" -ForegroundColor Yellow
-Write-Host "  Backend:  $BackendDir"
-Write-Host "  Frontend: $FrontendDir"
 Write-Host ""
+Write-Host "Paths:" -ForegroundColor Gray
+Write-Host "  Backend:  $BackendDir" -ForegroundColor Gray
+Write-Host "  Frontend: $FrontendDir" -ForegroundColor Gray
 
-# Step 1: Check prerequisites
-Write-Host "Step 1: Checking Prerequisites" -ForegroundColor Yellow
-Write-Host "------------------------------" -ForegroundColor Yellow
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STEP 1: Check Prerequisites
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write-Step "Step 1: Checking Prerequisites"
 
-$pythonVersion = python --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Python not found! Please install Python 3.12 from https://www.python.org/" -ForegroundColor Red
+# Check Python
+try {
+    $pythonVersion = python --version 2>&1
+    Write-Success "Python: $pythonVersion"
+} catch {
+    Write-Error "Python not found!"
+    Write-Host "Install from: https://www.python.org/downloads/" -ForegroundColor Yellow
     exit 1
 }
-Write-Host "Python: $pythonVersion" -ForegroundColor Green
 
-$nodeVersion = node --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Node.js not found! Please install from https://nodejs.org/" -ForegroundColor Red
+# Check Node.js
+try {
+    $nodeVersion = node --version 2>&1
+    Write-Success "Node.js: $nodeVersion"
+} catch {
+    Write-Error "Node.js not found!"
+    Write-Host "Install from: https://nodejs.org/" -ForegroundColor Yellow
     exit 1
 }
-Write-Host "Node.js: $nodeVersion" -ForegroundColor Green
 
-$pnpmVersion = pnpm --version 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Installing pnpm..." -ForegroundColor Yellow
+# Check/Install pnpm
+try {
+    $pnpmVersion = pnpm --version 2>&1
+    Write-Success "pnpm: v$pnpmVersion"
+} catch {
+    Write-Host "Installing pnpm globally..." -ForegroundColor Yellow
     npm install -g pnpm
+    $pnpmVersion = pnpm --version 2>&1
+    Write-Success "pnpm: v$pnpmVersion installed"
 }
-Write-Host "pnpm: v$pnpmVersion" -ForegroundColor Green
 
-Write-Host ""
-
-# Step 2: Setup Backend
-Write-Host "Step 2: Backend Setup" -ForegroundColor Yellow
-Write-Host "------------------------------" -ForegroundColor Yellow
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STEP 2: Backend Setup
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write-Step "Step 2: Backend Setup"
 
 Set-Location $BackendDir
 
-# Check for .env file
+# Check for .env
 if (-not (Test-Path ".env")) {
-    Write-Host "WARNING: No .env file found!" -ForegroundColor Yellow
-    Write-Host "Creating template .env file..." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "⚠ No .env file found! Creating template..." -ForegroundColor Yellow
     
-    $envTemplate = @'
+    $envContent = @"
 DEBUG=true
 LOCAL=true
 AUTH_DISABLED=true
@@ -69,113 +97,124 @@ OPENAI_API_KEY=sk-proj-YOUR-KEY-HERE
 EMBED_PROVIDER=openai
 EMBED_MODEL=text-embedding-3-small
 LANGGRAPH_RECURSION_LIMIT=200
-'@
+"@
     
-    Set-Content -Path ".env" -Value $envTemplate
+    $envContent | Out-File -FilePath ".env" -Encoding UTF8 -NoNewline
     
     Write-Host ""
-    Write-Host "IMPORTANT: Edit .env and add your OpenAI API key!" -ForegroundColor Red
-    Write-Host "File location: $BackendDir\.env" -ForegroundColor Yellow
+    Write-Host "CRITICAL: You MUST edit .env and add your OpenAI API key!" -ForegroundColor Red
+    Write-Host "File: $BackendDir\.env" -ForegroundColor Yellow
     Write-Host ""
-    $continue = Read-Host "Press Enter after you've added your API key, or Ctrl+C to exit"
+    
+    $openEnv = Read-Host "Open .env in notepad now? (Y/n)"
+    if ($openEnv -ne "n") {
+        notepad ".env"
+        Write-Host ""
+        Read-Host "Press Enter after you've saved your API key"
+    }
 }
 
-# Create venv if needed
+# Create venv
 if (-not (Test-Path "venv")) {
     Write-Host "Creating Python virtual environment..." -ForegroundColor Gray
     python -m venv venv
+    Write-Success "Virtual environment created"
 }
 
-# Activate and install
-Write-Host "Installing Python dependencies..." -ForegroundColor Gray
-& "$BackendDir\venv\Scripts\pip.exe" install --upgrade pip --quiet
-& "$BackendDir\venv\Scripts\pip.exe" install -r requirements.txt --quiet
+# Install Python dependencies
+Write-Host "Installing Python dependencies (may take a few minutes)..." -ForegroundColor Gray
+& "venv\Scripts\python.exe" -m pip install --upgrade pip --quiet 2>&1 | Out-Null
+& "venv\Scripts\python.exe" -m pip install -r requirements.txt --quiet
 
-Write-Host "Backend ready!" -ForegroundColor Green
-Write-Host ""
+Write-Success "Backend ready!"
 
-# Step 3: Setup Frontend  
-Write-Host "Step 3: Frontend Setup" -ForegroundColor Yellow
-Write-Host "------------------------------" -ForegroundColor Yellow
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STEP 3: Frontend Setup
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write-Step "Step 3: Frontend Setup"
 
 Set-Location $FrontendDir
 
-# Create pnpm-workspace.yaml if missing
+# Create pnpm-workspace.yaml
 if (-not (Test-Path "pnpm-workspace.yaml")) {
     Write-Host "Creating pnpm-workspace.yaml..." -ForegroundColor Gray
     
-    $workspaceContent = @'
+    $workspace = @"
 packages:
   - 'apps/*'
   - 'shared/*'
-'@
+"@
     
-    Set-Content -Path "pnpm-workspace.yaml" -Value $workspaceContent
+    $workspace | Out-File -FilePath "pnpm-workspace.yaml" -Encoding UTF8 -NoNewline
+    Write-Success "Created pnpm-workspace.yaml"
 }
 
-# Install dependencies
+# Install Node dependencies
 if (-not (Test-Path "node_modules")) {
-    Write-Host "Installing Node dependencies (this takes a few minutes)..." -ForegroundColor Gray
-    pnpm install --no-frozen-lockfile
+    Write-Host "Installing Node dependencies (this takes 2-5 minutes)..." -ForegroundColor Gray
+    pnpm install --no-frozen-lockfile 2>&1 | Out-Null
+    Write-Success "Node modules installed"
 } else {
-    Write-Host "Node modules already installed" -ForegroundColor Green
+    Write-Success "Node modules already installed"
 }
 
-Write-Host "Frontend ready!" -ForegroundColor Green
-Write-Host ""
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STEP 4: Start Services
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Write-Step "Step 4: Starting Services"
 
-# Step 4: Start services
-Write-Host "Step 4: Starting Services" -ForegroundColor Yellow
-Write-Host "------------------------------" -ForegroundColor Yellow
-
-# Create backend start script
-$backendStartScript = @'
-& "$env:VIRTUAL_ENV\Scripts\Activate.ps1"
-Write-Host "Starting backend on http://localhost:8000..." -ForegroundColor Cyan
+# Backend start script
+$backendScript = @"
+Set-Location '$BackendDir'
+`$env:VIRTUAL_ENV = '$BackendDir\venv'
+& '$BackendDir\venv\Scripts\Activate.ps1'
+Write-Host 'Starting backend on http://localhost:8000...' -ForegroundColor Cyan
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-'@
+"@
 
-$backendScriptPath = Join-Path $BackendDir "start-backend.ps1"
-Set-Content -Path $backendScriptPath -Value $backendStartScript
+$backendScriptPath = Join-Path $BackendDir "run-backend.ps1"
+$backendScript | Out-File -FilePath $backendScriptPath -Encoding UTF8
 
-# Create frontend start script
-$frontendStartScript = @'
-Write-Host "Starting frontend on http://localhost:3000..." -ForegroundColor Cyan
+# Frontend start script  
+$frontendScript = @"
+Set-Location '$FrontendDir'
+Write-Host 'Starting frontend on http://localhost:3000...' -ForegroundColor Cyan
 pnpm dev
-'@
+"@
 
-$frontendScriptPath = Join-Path $FrontendDir "start-frontend.ps1"
-Set-Content -Path $frontendScriptPath -Value $frontendStartScript
+$frontendScriptPath = Join-Path $FrontendDir "run-frontend.ps1"
+$frontendScript | Out-File -FilePath $frontendScriptPath -Encoding UTF8
 
-# Start backend in new window
-Write-Host "Launching backend..." -ForegroundColor Gray
-Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScriptPath -WorkingDirectory $BackendDir
+# Launch backend
+Write-Host "Launching backend server..." -ForegroundColor Gray
+Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $backendScriptPath
 
 Start-Sleep -Seconds 5
 
-# Start frontend in new window
-Write-Host "Launching frontend..." -ForegroundColor Gray
-Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $frontendScriptPath -WorkingDirectory $FrontendDir
+# Launch frontend
+Write-Host "Launching frontend server..." -ForegroundColor Gray
+Start-Process powershell -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-File", $frontendScriptPath
 
 Start-Sleep -Seconds 5
 
 Write-Host ""
-Write-Host "========================================" -ForegroundColor Green
-Write-Host "   Services Started Successfully!       " -ForegroundColor Green
-Write-Host "========================================" -ForegroundColor Green
+Write-Host "══════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "   ✓ Services Started Successfully!          " -ForegroundColor Green
+Write-Host "══════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "Backend:  http://localhost:8000" -ForegroundColor White
 Write-Host "Frontend: http://localhost:3000" -ForegroundColor White
 Write-Host "API Docs: http://localhost:8000/docs" -ForegroundColor White
 Write-Host ""
-Write-Host "Two PowerShell windows opened - close them to stop services" -ForegroundColor Yellow
+Write-Host "Two PowerShell windows opened." -ForegroundColor Yellow
+Write-Host "Close them to stop the services." -ForegroundColor Yellow
 Write-Host ""
 
-# Open browser after delay
+# Wait and open browser
 Start-Sleep -Seconds 3
 Write-Host "Opening browser..." -ForegroundColor Gray
 Start-Process "http://localhost:3000"
 
 Write-Host ""
-Write-Host "Press any key to exit this window..." -ForegroundColor Gray
+Write-Host "Press any key to close this window..." -ForegroundColor Gray
 $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
