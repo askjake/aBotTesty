@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     PLLM_API_BASE: Optional[str] = None
     PLLM_MODEL: str = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     PLLM_CTX_LEN: int = 200_000
+
+    
+    # API Keys for LLM Providers
+    OPENAI_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
+    GOOGLE_API_KEY: Optional[str] = None  # For Gemini
     ELLM_PROVIDER: Optional[Literal["aws-bedrock", "openai", "anthropic"]] = (
         "aws-bedrock"
     )
