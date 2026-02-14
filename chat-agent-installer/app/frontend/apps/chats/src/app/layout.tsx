@@ -1,17 +1,15 @@
 'use client';
 
 import { Provider } from 'react-redux';
-import { ReactNode } from 'react';
+import { ReactNode, useMemo } from 'react';
 import { ThemeLayout } from '@shared/ui/components/layouts/ThemeLayout';
 import DeployNotifier from '@shared/ui/components/molecules/Notifiers/DeployNotifier';
 import { makeStore } from '@shared/ui/store';
 
-// Create store instance for App Router
-// Note: This creates a single store instance per app load
-// For SSR with state hydration, you'd need a more complex setup
-const store = makeStore();
-
 export default function RootLayout({ children }: { children: ReactNode }) {
+  // Create store instance with empty context for client-side rendering
+  const store = useMemo(() => makeStore({} as any), []);
+  
   return (
     <html lang="en">
       <head>

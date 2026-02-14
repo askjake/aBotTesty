@@ -15,7 +15,7 @@ settings = get_settings()
 def get_prompt(name: str):
     current_dir = Path(__file__).parent
     prompt_path = current_dir / "prompts" / f"{name}_prompt.txt"
-    with open(prompt_path) as f:
+    with open(prompt_path, encoding="utf-8") as f:
         prompt = f.read()
     return prompt
 
