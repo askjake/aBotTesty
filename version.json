@@ -1,0 +1,12 @@
+{
+  "package_name": "chat-agent-installer",
+  "version": "1.0.0",
+  "build_date": "2026-02-04",
+  "created_by": "Dish-Chat AI Assistant",
+  "platforms": [
+    "linux",
+    "windows",
+    "macos"
+  ],
+  "status": "ready_for_distribution"
+}
