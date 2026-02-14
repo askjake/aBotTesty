@@ -128,6 +128,7 @@ if settings.DEBUG:
     app.add_middleware(LogRespMiddleware)
 
 
+from app.llm_config.router import router as llm_config_router
 from app.health.router import router as health_router
 from app.user.router import router as user_router
 from app.chat.router import router as chat_router
@@ -174,6 +175,7 @@ boto3.client = _patched_client
 
 
 
+app.include_router(llm_config_router, prefix=settings.API_PREFIX, tags=["LLM Configuration"])
 app.include_router(health_router, prefix=settings.API_PREFIX)
 app.include_router(user_router, prefix=settings.API_PREFIX)
 app.include_router(chat_router, prefix=settings.API_PREFIX)

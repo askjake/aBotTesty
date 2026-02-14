@@ -396,3 +396,138 @@ Internal use only. All rights reserved.
 **Python**: 3.12+  
 **Node.js**: 20+  
 **PostgreSQL**: 14+
+
+
+---
+
+## 🤖 Multi-LLM Provider Support
+
+This chat agent now supports multiple LLM providers! You can use:
+
+- **OpenAI** (ChatGPT) - GPT-4, GPT-3.5
+- **Anthropic** (Claude) - Claude 3.5 Sonnet, Haiku
+- **Google** (Gemini) - Gemini 1.5 Pro, Flash
+- **Ollama** (Local) - Run models locally on your machine
+- **AWS Bedrock** - Claude via AWS
+- **Custom** - Any OpenAI-compatible API
+
+### Quick Start with LLM Providers
+
+#### Option 1: Auto-Discovery (Recommended)
+
+The app will automatically detect available providers when you start it:
+
+```bash
+# Linux/macOS
+./scripts/smart-start.sh
+
+# Windows
+.\scripts\smart-start.ps1
+```
+
+This will:
+1. Detect API keys from environment variables
+2. Discover local Ollama instances
+3. Start the application with available providers
+
+#### Option 2: Manual Configuration
+
+1. Set environment variables for your preferred providers:
+
+```bash
+# For OpenAI
+export OPENAI_API_KEY="sk-proj-your-key-here"
+
+# For Anthropic
+export ANTHROPIC_API_KEY="sk-ant-your-key-here"
+
+# For Google Gemini
+export GOOGLE_API_KEY="your-gemini-key-here"
+```
+
+2. Or install Ollama for local LLMs:
+
+```bash
+# Install Ollama from https://ollama.ai
+ollama pull llama3
+ollama serve  # Runs on http://localhost:11434
+```
+
+3. Configure providers in the UI:
+   - Open the app at http://localhost:3000
+   - Click "⚙️ Settings" → "LLM Providers"
+   - Click "➕ Add Provider" or "🔍 Auto-Discover"
+
+### Managing LLM Providers
+
+#### Via Web UI
+
+1. **Add a Provider:**
+   - Settings → LLM Providers → Add Provider
+   - Enter name, type, and API key
+   - Click "Test" to verify connection
+
+2. **Switch Providers:**
+   - Use the dropdown in the chat interface
+   - Select your preferred provider for each conversation
+
+3. **Set Default:**
+   - Click "Set Default" on your preferred provider
+   - All new chats will use this provider
+
+#### Via Environment Variables
+
+The app reads these environment variables on startup:
+
+```bash
+# LLM Provider Configuration
+OPENAI_API_KEY=sk-proj-...        # For OpenAI/ChatGPT
+ANTHROPIC_API_KEY=sk-ant-...      # For Anthropic/Claude
+GOOGLE_API_KEY=...                # For Google/Gemini
+
+# Legacy configuration (still supported)
+PLLM_PROVIDER=openai              # Default: aws-bedrock
+PLLM_MODEL=gpt-4o                 # Power model
+ELLM_PROVIDER=openai              # Efficient provider
+ELLM_MODEL=gpt-4o-mini            # Efficient model
+```
+
+### Using Ollama (Local LLMs)
+
+1. Install Ollama: https://ollama.ai
+2. Pull a model:
+   ```bash
+   ollama pull llama3
+   ollama pull mistral
+   ollama pull codellama
+   ```
+3. Start Ollama: `ollama serve`
+4. The app will auto-discover it on startup!
+
+### Custom / Self-Hosted LLMs
+
+For any OpenAI-compatible API:
+
+1. Add a "Custom" provider in Settings
+2. Set the API Base URL (e.g., `http://localhost:8080/v1`)
+3. Optionally set an API key if required
+4. Test the connection
+
+### API Endpoints
+
+The following new REST API endpoints are available:
+
+```
+GET    /rest/api/v1/llm-providers              # List all providers
+POST   /rest/api/v1/llm-providers              # Create provider
+GET    /rest/api/v1/llm-providers/{id}         # Get provider
+PUT    /rest/api/v1/llm-providers/{id}         # Update provider
+DELETE /rest/api/v1/llm-providers/{id}         # Delete provider
+POST   /rest/api/v1/llm-providers/{id}/set-default  # Set as default
+POST   /rest/api/v1/llm-providers/test         # Test connection
+POST   /rest/api/v1/llm-providers/discover     # Auto-discover
+```
+
+Full API documentation: http://localhost:8000/docs
+
+---
