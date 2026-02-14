@@ -221,7 +221,7 @@ class Settings(BaseSettings):
     REVIEW_MODEL_ARN: Optional[str] = None
 
     # Read from .env
-    model_config = SettingsConfigDict(env_file=(".env", ".env.local"))
+    model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="allow", case_sensitive=False)
 
     # Enable / disable MCP tool sets (handy for local dev)
     ENABLE_LOG_ASSIST_MCP: bool = True
