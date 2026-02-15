@@ -1,14 +1,23 @@
 # Complete Quick Start for Windows
-# This script starts PostgreSQL AND the application
+# Run this from chat-agent-installer/ directory
 
 Write-Host "Starting Dish-Chat..." -ForegroundColor Green
+Write-Host ""
 
 # Check if we're in the right directory
 if (-not (Test-Path "docker-compose.yml")) {
     Write-Host "Error: Run this from chat-agent-installer directory" -ForegroundColor Red
     Write-Host "Expected location: chat-agent-installer/" -ForegroundColor Yellow
+    Write-Host "Current location: $PWD" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor Cyan
+    Write-Host "  cd C:\Users\Systems1\Documents\aBotTesty\chat-agent-installer" -ForegroundColor Cyan
+    Write-Host "  .\scripts\quick-start-windows.ps1" -ForegroundColor Cyan
     exit 1
 }
+
+Write-Host "✓ Running from correct directory" -ForegroundColor Green
+Write-Host ""
 
 # Check if Docker is running
 $dockerRunning = $false
@@ -20,20 +29,12 @@ try {
 }
 
 if ($dockerRunning) {
-    Write-Host ""
     Write-Host "Starting PostgreSQL database..." -ForegroundColor Cyan
     docker compose up -d
     
     Write-Host "Waiting for database to be ready..." -ForegroundColor Cyan
     Start-Sleep -Seconds 5
-    
-    # Check database is healthy
-    $dbHealthy = docker compose ps --format json | ConvertFrom-Json | Where-Object { $_.Health -eq "healthy" }
-    if ($dbHealthy) {
-        Write-Host "Database is ready!" -ForegroundColor Green
-    } else {
-        Write-Host "Database is starting... (may take a few more seconds)" -ForegroundColor Yellow
-    }
+    Write-Host "✓ Database ready!" -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "Docker not available. Make sure PostgreSQL is running manually:" -ForegroundColor Yellow
@@ -42,37 +43,95 @@ if ($dockerRunning) {
     Write-Host "  Database: dishchat" -ForegroundColor Cyan
     Write-Host "  User: dev_user" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "Press any key to continue (or Ctrl+C to abort)..."
-    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
+
+# Check if venv exists in backend
+$backendVenv = Join-Path $PWD "app\backend\venv"
+if (-not (Test-Path $backendVenv)) {
+    Write-Host "Warning: Virtual environment not found at $backendVenv" -ForegroundColor Yellow
+    Write-Host "Creating virtual environment..." -ForegroundColor Cyan
+    
+    $backendPath = Join-Path $PWD "app\backend"
+    Push-Location $backendPath
+    python -m venv venv
+    & ".\venv\Scripts\Activate.ps1"
+    pip install -r requirements.txt
+    Pop-Location
+    
+    Write-Host "✓ Virtual environment created" -ForegroundColor Green
+}
+
+# Check if .env exists
+$envFile = Join-Path $PWD "app\backend\.env"
+if (-not (Test-Path $envFile)) {
+    Write-Host ""
+    Write-Host "⚠️  Warning: .env file not found" -ForegroundColor Yellow
+    Write-Host "Creating .env from .env.example..." -ForegroundColor Cyan
+    
+    $envExample = Join-Path $PWD "app\backend\.env.example"
+    if (Test-Path $envExample) {
+        Copy-Item $envExample $envFile
+        Write-Host "✓ Created .env file" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "IMPORTANT: Edit app/backend/.env and add your API keys!" -ForegroundColor Yellow
+        Write-Host "  - Add OPENAI_API_KEY or other LLM provider keys" -ForegroundColor Yellow
+        Write-Host ""
+    }
 }
 
 # Start Backend
 Write-Host ""
 Write-Host "Starting Backend..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PWD\app\backend'; .\venv\Scripts\activate; python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+$backendCmd = "cd '$PWD\app\backend'; & '.\venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
 
 # Wait for backend to start
 Write-Host "Waiting for backend to start..." -ForegroundColor Cyan
 Start-Sleep -Seconds 10
 
+# Check if frontend dependencies are installed
+$frontendNodeModules = Join-Path $PWD "app\frontend\node_modules"
+if (-not (Test-Path $frontendNodeModules)) {
+    Write-Host "Installing frontend dependencies..." -ForegroundColor Cyan
+    $frontendPath = Join-Path $PWD "app\frontend"
+    Push-Location $frontendPath
+    pnpm install
+    Pop-Location
+    Write-Host "✓ Frontend dependencies installed" -ForegroundColor Green
+}
+
 # Start Frontend
 Write-Host "Starting Frontend..." -ForegroundColor Cyan
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$PWD\app\frontend'; pnpm dev"
+$frontendCmd = "cd '$PWD\app\frontend'; pnpm dev"
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
 
 # Wait for frontend to start
+Write-Host "Waiting for frontend to start..." -ForegroundColor Cyan
 Start-Sleep -Seconds 5
 
 # Open browser
+Write-Host ""
 Write-Host "Opening browser..." -ForegroundColor Green
+Start-Sleep -Seconds 3
 Start-Process "http://localhost:3000"
 
 Write-Host ""
-Write-Host "Services started!" -ForegroundColor Green
-Write-Host "  Database: 127.0.0.1:5434 (PostgreSQL)" -ForegroundColor Cyan
-Write-Host "  Backend:  http://localhost:8000" -ForegroundColor Cyan
-Write-Host "  Frontend: http://localhost:3000" -ForegroundColor Cyan
+Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "  ✓ Services Started Successfully!" -ForegroundColor Green
+Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host ""
+Write-Host "Services:" -ForegroundColor Cyan
+Write-Host "  Database: 127.0.0.1:5434 (PostgreSQL)" -ForegroundColor White
+Write-Host "  Backend:  http://localhost:8000" -ForegroundColor White
+Write-Host "  API Docs: http://localhost:8000/api/docs" -ForegroundColor White
+Write-Host "  Frontend: http://localhost:3000" -ForegroundColor White
 Write-Host ""
 Write-Host "To stop all services:" -ForegroundColor Yellow
-Write-Host "  1. Close the Backend and Frontend PowerShell windows" -ForegroundColor Yellow
-Write-Host "  2. Run: docker compose down" -ForegroundColor Yellow
+Write-Host "  1. Close the Backend and Frontend PowerShell windows" -ForegroundColor White
+Write-Host "  2. Run: docker compose down" -ForegroundColor White
+Write-Host ""
+Write-Host "Troubleshooting:" -ForegroundColor Yellow
+Write-Host "  - Check backend logs in the Backend window" -ForegroundColor White
+Write-Host "  - Check frontend logs in the Frontend window" -ForegroundColor White
+Write-Host "  - Verify .env file has API keys: app\backend\.env" -ForegroundColor White
 Write-Host ""
