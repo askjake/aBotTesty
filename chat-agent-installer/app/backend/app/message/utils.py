@@ -177,9 +177,9 @@ async def sse_transformer_for_langgraph_astream(
                     logger.debug(f"  → SKIP: content_item is not dict")
                     continue
 
-                if content_item.get("index") is None:
-                    logger.debug(f"  → SKIP: content_item has no index")
-                    continue  # Skip this content item if it has no index
+                # Use index from content_item, or default to current content_index
+                item_index = content_item.get("index", content_index)
+                logger.debug(f"  → item_index = {item_index}")
 
                 item_type = content_item.get("type")  # e.g., "text"
 
