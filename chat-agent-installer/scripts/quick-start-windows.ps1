@@ -19,6 +19,19 @@ if (-not (Test-Path "docker-compose.yml")) {
 Write-Host "[OK] Running from correct directory" -ForegroundColor Green
 Write-Host ""
 
+# Check for running processes
+Write-Host "Checking for running processes on ports 3000/3001..." -ForegroundColor Cyan
+$port3000 = Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue
+$port3001 = Get-NetTCPConnection -LocalPort 3001 -State Listen -ErrorAction SilentlyContinue
+
+if ($port3000 -or $port3001) {
+    Write-Host "WARNING: Ports already in use. Killing old processes..." -ForegroundColor Yellow
+    Get-Process -Name node -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name python -ErrorAction SilentlyContinue | Where-Object {`$_.Path -like '*chat-agent-installer*'} | Stop-Process -Force
+    Start-Sleep -Seconds 2
+    Write-Host "[OK] Old processes killed" -ForegroundColor Green
+}
+
 # Check if Docker is running
 $dockerRunning = $false
 try {
@@ -79,16 +92,22 @@ if (-not (Test-Path $envFile)) {
     }
 }
 
-# Run database migrations
+# Run database migrations from correct directory
 Write-Host ""
 Write-Host "Running database migrations..." -ForegroundColor Cyan
-Push-Location "$PWD\app\backend"
-if (Test-Path ".\venv\Scripts\Activate.ps1") {
-    & ".\venv\Scripts\Activate.ps1"
+Push-Location "$PWD\app\backend\app"
+if (Test-Path "..\venv\Scripts\Activate.ps1") {
+    & "..\venv\Scripts\Activate.ps1"
 }
 alembic upgrade head
+$migrationResult = $LASTEXITCODE
 Pop-Location
-Write-Host "[OK] Migrations complete" -ForegroundColor Green
+
+if ($migrationResult -eq 0) {
+    Write-Host "[OK] Migrations complete" -ForegroundColor Green
+} else {
+    Write-Host "WARNING: Migration had issues (may be okay if already migrated)" -ForegroundColor Yellow
+}
 
 # Start Backend
 Write-Host ""
@@ -118,7 +137,7 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
 
 # Wait for frontend to start
 Write-Host "Waiting for frontend to start..." -ForegroundColor Cyan
-Start-Sleep -Seconds 5
+Start-Sleep -Seconds 8
 
 # Open browser
 Write-Host ""
@@ -145,4 +164,5 @@ Write-Host "Troubleshooting:" -ForegroundColor Yellow
 Write-Host "  - Check backend logs in the Backend window" -ForegroundColor White
 Write-Host "  - Check frontend logs in the Frontend window" -ForegroundColor White
 Write-Host "  - Verify .env file has API keys: app\backend\.env" -ForegroundColor White
+Write-Host "  - Run migrations manually: .\scripts\run-migrations.ps1" -ForegroundColor White
 Write-Host ""
