@@ -686,10 +686,11 @@ export const handleMessageSend = async ({
         });
 
         // Apply final update with all content
-        // FIX: Always update state, even if no new content (to clear loading state)
-        const finalMessages = {
-          ...currentChat!.messages,
-        };
+        // Build final message content
+        const finalMessages: RawMessageType = {};
+        Object.keys(currentChat!.messages).forEach((key) => {
+          finalMessages[key] = { ...currentChat!.messages[key] };
+        });
         
         // Update AI message with final content
         if (aiMessageId) {
@@ -705,35 +706,30 @@ export const handleMessageSend = async ({
           };
         }
 
-        // Create completely new chat object with explicit new references
-        const updatedChat = {
-          ...currentChat!,
+        // SIMPLE FIX: Create new object, force update twice
+        currentChat = {
+          chat_id: currentChat!.chat_id,
+          title: currentChat!.title,
+          owner_id: currentChat!.owner_id,
+          namespace: currentChat!.namespace,
+          created_at: currentChat!.created_at,
+          last_message_at: currentChat!.last_message_at || new Date().toISOString(),
+          vault_mode: currentChat!.vault_mode,
+          favorite: currentChat!.favorite,
+          status: currentChat!.status,
+          status_msg: currentChat!.status_msg,
+          group_id: currentChat!.group_id,
+          active: currentChat!.active,
           messages: finalMessages,
-          _lastUpdate: Date.now(), // Force new reference
         };
         
-        // Update current reference
-        currentChat = updatedChat;
+        // Force update with new object reference
+        setActiveChat(currentChat);
         
-        // CRITICAL FIX: Force React to see this as a new object
-        // Method 1: Immediate update with spread to create new reference
-        setActiveChat({ ...updatedChat });
-        
-        // Method 2: Use queueMicrotask for guaranteed state flush
-        queueMicrotask(() => {
-          setActiveChat({ 
-            ...updatedChat,
-            _rendered: true,
-          });
-        });
-        
-        // Method 3: Backup setTimeout to ensure render happens
-        setTimeout(() => {
-          setActiveChat({ 
-            ...updatedChat,
-            _complete: true,
-          });
-        }, 50); // Enough time for React to process
+        // Second update after microtask to ensure render
+        Promise.resolve().then(() => {
+          setActiveChat({ ...currentChat!, _forceRender: Date.now() });
+        })
 
       } catch (streamError) {
         if (renderIntervalId) {
