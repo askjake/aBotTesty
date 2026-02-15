@@ -592,6 +592,7 @@ export const handleMessageSend = async ({
                   displayedLengths[index] = 0;
                 }
                 contentByIndex[index].buffer.push(delta?.text || '');
+                console.log('[STREAM DEBUG] Added text chunk:', delta?.text, 'Total buffer length:', contentByIndex[index].buffer.length);
               }
             }
 
@@ -685,7 +686,11 @@ export const handleMessageSend = async ({
           }
         });
 
+        console.log('[STREAM DEBUG] Stream complete! contentByIndex:', Object.keys(contentByIndex), 'finalContentUpdates will be built now');
+        
         // Apply final update with all content
+        console.log('[STREAM DEBUG] finalContentUpdates built:', finalContentUpdates, 'Keys:', Object.keys(finalContentUpdates));
+        
         // Build final message content
         const finalMessages: RawMessageType = {};
         Object.keys(currentChat!.messages).forEach((key) => {
@@ -724,6 +729,7 @@ export const handleMessageSend = async ({
         };
         
         // Force update with new object reference
+        console.log('[STREAM DEBUG] Setting active chat with messages:', Object.keys(currentChat.messages), 'AI message content:', currentChat.messages[aiMessageId]?.content);
         setActiveChat(currentChat);
         
         // Second update after microtask to ensure render
