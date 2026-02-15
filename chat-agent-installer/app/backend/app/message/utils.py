@@ -169,12 +169,16 @@ async def sse_transformer_for_langgraph_astream(
 
             if (
                 chunk.content
-            ):  # Should be a list, e.g., [{'type': 'text', 'text': 'Hello', 'index': 0}]
+            ):  # Should be a list
+                logger.debug(f"  → chunk.content = {chunk.content}"), e.g., [{'type': 'text', 'text': 'Hello', 'index': 0}]
                 content_item = chunk.content[0]
+                logger.debug(f"  → content_item = {content_item}")
                 if not isinstance(content_item, dict):
+                    logger.debug(f"  → SKIP: content_item is not dict")
                     continue
 
                 if content_item.get("index") is None:
+                    logger.debug(f"  → SKIP: content_item has no index")
                     continue  # Skip this content item if it has no index
 
                 item_type = content_item.get("type")  # e.g., "text"
