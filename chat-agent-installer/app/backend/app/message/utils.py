@@ -157,6 +157,7 @@ async def sse_transformer_for_langgraph_astream(
             model_name = metadata["ls_model_name"]
 
         async for chunk, metadata in astream_output:
+            logger.debug(f"CHUNK: content={bool(chunk.content)}, stop_reason={chunk.response_metadata.get('stopReason')}")
             # All message content has finished
             if (
                 chunk.response_metadata
@@ -197,6 +198,7 @@ async def sse_transformer_for_langgraph_astream(
                                 mapped_type: "",
                             },  # e.g. {"type":"text", "text":""}
                         }
+                        logger.debug(f"YIELDING content_block_start: {cb_start_data}")
                         yield _format_sse_event("content_block_start", cb_start_data)
                         in_content_block = True
 
@@ -208,11 +210,13 @@ async def sse_transformer_for_langgraph_astream(
                             "index": content_index,
                             "delta": _format_content_delta(item_type, item_data),
                         }
+                        logger.debug(f"YIELDING content_block_delta: {delta_event_data}")
                         yield _format_sse_event("content_block_delta", delta_event_data)
 
                 # --- Content Block Stop ---
                 # (e.g., content_item is {'index': 0} with no 'type')
                 elif not item_type and in_content_block:
+                    logger.debug(f"YIELDING content_block_stop at index {content_index}")
                     yield _format_sse_event(
                         "content_block_stop",
                         {"type": "content_block_stop", "index": content_index},
