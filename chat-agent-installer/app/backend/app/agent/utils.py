@@ -87,11 +87,18 @@ def aggressive_cachept(
 ) -> list[BaseMessage]:
     """Cachepoint at most the last <max_cachepts> human messages
     
+    Cache points are only supported by Anthropic models.
+    Set max_cachepts to 0 to disable (required for Ollama, OpenAI, etc).
+    
     Args:
         messages: List of messages to add cachepoints to
         max_cachepts: Maximum number of cachepoints to add
         exclude_last_turn: If True, skip the most recent human message
     """
+    
+    # Skip if max_cachepts is 0 (required for non-Anthropic models)
+    if max_cachepts == 0:
+        return messages
 
     n_cachept = 0
     skip_first = exclude_last_turn
