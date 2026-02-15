@@ -38,7 +38,7 @@ except ImportError:
     ChatOllama = None
 
 from app.config import get_settings
-from app.core.llm.schemas import LLMProviderType, LLMProviderConfig
+from app.core.llm.schemas import LLMProviderType, LLMProviderConfig, LLMModelConfig
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
