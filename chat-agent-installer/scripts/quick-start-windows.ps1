@@ -16,7 +16,7 @@ if (-not (Test-Path "docker-compose.yml")) {
     exit 1
 }
 
-Write-Host "✓ Running from correct directory" -ForegroundColor Green
+Write-Host "[OK] Running from correct directory" -ForegroundColor Green
 Write-Host ""
 
 # Check if Docker is running
@@ -34,7 +34,7 @@ if ($dockerRunning) {
     
     Write-Host "Waiting for database to be ready..." -ForegroundColor Cyan
     Start-Sleep -Seconds 5
-    Write-Host "✓ Database ready!" -ForegroundColor Green
+    Write-Host "[OK] Database ready!" -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "Docker not available. Make sure PostgreSQL is running manually:" -ForegroundColor Yellow
@@ -58,26 +58,37 @@ if (-not (Test-Path $backendVenv)) {
     pip install -r requirements.txt
     Pop-Location
     
-    Write-Host "✓ Virtual environment created" -ForegroundColor Green
+    Write-Host "[OK] Virtual environment created" -ForegroundColor Green
 }
 
 # Check if .env exists
 $envFile = Join-Path $PWD "app\backend\.env"
 if (-not (Test-Path $envFile)) {
     Write-Host ""
-    Write-Host "⚠️  Warning: .env file not found" -ForegroundColor Yellow
+    Write-Host "WARNING: .env file not found" -ForegroundColor Yellow
     Write-Host "Creating .env from .env.example..." -ForegroundColor Cyan
     
     $envExample = Join-Path $PWD "app\backend\.env.example"
     if (Test-Path $envExample) {
         Copy-Item $envExample $envFile
-        Write-Host "✓ Created .env file" -ForegroundColor Green
+        Write-Host "[OK] Created .env file" -ForegroundColor Green
         Write-Host ""
         Write-Host "IMPORTANT: Edit app/backend/.env and add your API keys!" -ForegroundColor Yellow
         Write-Host "  - Add OPENAI_API_KEY or other LLM provider keys" -ForegroundColor Yellow
         Write-Host ""
     }
 }
+
+# Run database migrations
+Write-Host ""
+Write-Host "Running database migrations..." -ForegroundColor Cyan
+Push-Location "$PWD\app\backend"
+if (Test-Path ".\venv\Scripts\Activate.ps1") {
+    & ".\venv\Scripts\Activate.ps1"
+}
+alembic upgrade head
+Pop-Location
+Write-Host "[OK] Migrations complete" -ForegroundColor Green
 
 # Start Backend
 Write-Host ""
@@ -97,7 +108,7 @@ if (-not (Test-Path $frontendNodeModules)) {
     Push-Location $frontendPath
     pnpm install
     Pop-Location
-    Write-Host "✓ Frontend dependencies installed" -ForegroundColor Green
+    Write-Host "[OK] Frontend dependencies installed" -ForegroundColor Green
 }
 
 # Start Frontend
@@ -116,9 +127,9 @@ Start-Sleep -Seconds 3
 Start-Process "http://localhost:3000"
 
 Write-Host ""
-Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  ✓ Services Started Successfully!" -ForegroundColor Green
-Write-Host "════════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "===============================================================" -ForegroundColor Green
+Write-Host "  Services Started Successfully!" -ForegroundColor Green
+Write-Host "===============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Services:" -ForegroundColor Cyan
 Write-Host "  Database: 127.0.0.1:5434 (PostgreSQL)" -ForegroundColor White
