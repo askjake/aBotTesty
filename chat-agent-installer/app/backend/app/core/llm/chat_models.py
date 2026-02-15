@@ -64,12 +64,14 @@ class LLMProviderRegistry:
             # Create default provider from env vars
             if provider_type == "openai":
                 api_key = getattr(settings, 'OPENAI_API_KEY', None)
+                api_base = getattr(settings, 'PLLM_API_BASE', None)
                 if api_key:
                     config = LLMProviderConfig(
                         id="env_openai",
                         name="OpenAI (from env)",
                         provider_type=LLMProviderType.OPENAI,
                         api_key=api_key,
+                        api_base=api_base,
                         is_default=True,
                         is_active=True
                     )
@@ -77,12 +79,14 @@ class LLMProviderRegistry:
             
             elif provider_type == "anthropic":
                 api_key = getattr(settings, 'ANTHROPIC_API_KEY', None)
+                api_base = getattr(settings, 'PLLM_API_BASE', None)
                 if api_key:
                     config = LLMProviderConfig(
                         id="env_anthropic",
                         name="Anthropic (from env)",
                         provider_type=LLMProviderType.ANTHROPIC,
                         api_key=api_key,
+                        api_base=api_base,
                         is_default=True,
                         is_active=True
                     )
