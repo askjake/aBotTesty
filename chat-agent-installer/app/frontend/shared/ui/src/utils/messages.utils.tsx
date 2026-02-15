@@ -689,7 +689,11 @@ export const handleMessageSend = async ({
         // FIX: Always update state, even if no new content (to clear loading state)
         const finalMessages = {
           ...currentChat!.messages,
-          [aiMessageId]: {
+        };
+        
+        // Update AI message with final content
+        if (aiMessageId) {
+          finalMessages[aiMessageId] = {
             ...currentChat!.messages[aiMessageId],
             content: Object.keys(finalContentUpdates).length > 0
               ? {
@@ -698,28 +702,38 @@ export const handleMessageSend = async ({
                 }
               : currentChat!.messages[aiMessageId]?.content || {},
             loading: false,
-          },
-        };
+          };
+        }
 
-        currentChat = {
+        // Create completely new chat object with explicit new references
+        const updatedChat = {
           ...currentChat!,
           messages: finalMessages,
-          _streamComplete: Date.now(), // Force new reference with timestamp
+          _lastUpdate: Date.now(), // Force new reference
         };
         
-        // CRITICAL: Force immediate state update with completely new object
-        setActiveChat(JSON.parse(JSON.stringify(currentChat!)));
+        // Update current reference
+        currentChat = updatedChat;
         
-        // CRITICAL: Use setTimeout to ensure React processes the update
-        // This flushes any pending state updates and forces a re-render
+        // CRITICAL FIX: Force React to see this as a new object
+        // Method 1: Immediate update with spread to create new reference
+        setActiveChat({ ...updatedChat });
+        
+        // Method 2: Use queueMicrotask for guaranteed state flush
+        queueMicrotask(() => {
+          setActiveChat({ 
+            ...updatedChat,
+            _rendered: true,
+          });
+        });
+        
+        // Method 3: Backup setTimeout to ensure render happens
         setTimeout(() => {
-          if (currentChat) {
-            setActiveChat({
-              ...currentChat!,
-              _finalRender: true,
-            });
-          }
-        }, 10); // Small delay to ensure state propagation
+          setActiveChat({ 
+            ...updatedChat,
+            _complete: true,
+          });
+        }, 50); // Enough time for React to process
 
       } catch (streamError) {
         if (renderIntervalId) {
