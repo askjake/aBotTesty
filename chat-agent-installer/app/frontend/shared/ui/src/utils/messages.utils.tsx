@@ -655,6 +655,16 @@ export const handleMessageSend = async ({
         // Mark stream as complete
         isStreamComplete = true;
 
+        // FIX: Clean up intervals and listeners FIRST (before final update)
+        if (renderIntervalId) {
+          clearInterval(renderIntervalId);
+          renderIntervalId = null;
+        }
+        document.removeEventListener(
+          'visibilitychange',
+          handleVisibilityChange,
+        );
+
         // Force render all remaining buffered content immediately
         const finalContentUpdates: Record<number, any> = {};
         Object.keys(contentByIndex).forEach((idx) => {
@@ -677,32 +687,35 @@ export const handleMessageSend = async ({
 
         // Apply final update with all content
         if (Object.keys(finalContentUpdates).length > 0) {
-          currentChat = {
-            ...currentChat!,
-            messages: {
-              ...currentChat!.messages,
-              [aiMessageId]: {
-                ...currentChat!.messages[aiMessageId],
-                content: {
-                  ...currentChat!.messages[aiMessageId]?.content,
-                  ...finalContentUpdates,
-                },
-                loading: false,
+          // FIX: Create completely new object references to force React re-render
+          const finalMessages = {
+            ...currentChat!.messages,
+            [aiMessageId]: {
+              ...currentChat!.messages[aiMessageId],
+              content: {
+                ...currentChat!.messages[aiMessageId]?.content,
+                ...finalContentUpdates,
               },
+              loading: false,
             },
           };
+
+          currentChat = {
+            ...currentChat!,
+            messages: finalMessages,
+          };
+          
+          // Force a complete state update with new references
           setActiveChat({ ...currentChat! });
+          
+          // Use setTimeout to ensure the state update is flushed to React
+          setTimeout(() => {
+            setActiveChat({ 
+              ...currentChat!,
+            });
+          }, 0);
         }
 
-        // Clean up intervals and listeners
-        if (renderIntervalId) {
-          clearInterval(renderIntervalId);
-          renderIntervalId = null;
-        }
-        document.removeEventListener(
-          'visibilitychange',
-          handleVisibilityChange,
-        );
       } catch (streamError) {
         if (renderIntervalId) {
           clearInterval(renderIntervalId);
