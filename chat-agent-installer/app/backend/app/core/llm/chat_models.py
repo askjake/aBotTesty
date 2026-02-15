@@ -65,13 +65,41 @@ class LLMProviderRegistry:
             if provider_type == "openai":
                 api_key = getattr(settings, 'OPENAI_API_KEY', None)
                 api_base = getattr(settings, 'PLLM_API_BASE', None)
+                model_id = getattr(settings, 'PLLM_MODEL', 'gpt-4o')
                 if api_key:
+                    # If using Ollama or custom endpoint, use the specified model
+                    # Otherwise use default OpenAI models
+                    if api_base and 'ollama' in api_base.lower():
+                        # Ollama: use the specified model from env
+                        models = [
+                            LLMModelConfig(
+                                model_id=model_id,
+                                display_name=f"Ollama: {model_id}",
+                                context_length=200000,
+                                supports_streaming=True
+                            )
+                        ]
+                    else:
+                        # OpenAI: allow model override from env
+                        models = None  # Will use defaults, but can be overridden
+                        if model_id != 'gpt-4o':
+                            # User specified a non-default model, use it
+                            models = [
+                                LLMModelConfig(
+                                    model_id=model_id,
+                                    display_name=model_id,
+                                    context_length=128000,
+                                    supports_streaming=True
+                                )
+                            ]
+                    
                     config = LLMProviderConfig(
                         id="env_openai",
                         name="OpenAI (from env)",
                         provider_type=LLMProviderType.OPENAI,
                         api_key=api_key,
                         api_base=api_base,
+                        models=models or [],  # Let validator set defaults if empty
                         is_default=True,
                         is_active=True
                     )
