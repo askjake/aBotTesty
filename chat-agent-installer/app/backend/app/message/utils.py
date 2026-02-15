@@ -170,7 +170,7 @@ async def sse_transformer_for_langgraph_astream(
             if (
                 chunk.content
             ):  # Should be a list
-                logger.debug(f"  → chunk.content = {chunk.content}"), e.g., [{'type': 'text', 'text': 'Hello', 'index': 0}]
+                logger.debug(f"  → chunk.content = {chunk.content}")  # e.g., [{'type': 'text', 'text': 'Hello', 'index': 0}]
                 content_item = chunk.content[0]
                 logger.debug(f"  → content_item = {content_item}")
                 if not isinstance(content_item, dict):
