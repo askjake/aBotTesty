@@ -128,9 +128,42 @@ def get_agent_mode_graph(checkpointer: BaseCheckpointSaver | None = None):
     # LLM reasoning node
     workflow.add_node("agent", agent_mode_node)
 
-    # Tool execution node
-    tool_node = ToolNode(tools=get_tools_set("agent_mode"))
-    workflow.add_node("tools", tool_node)
+    # Tool execution node - Custom implementation to inject chat_id
+    def tool_execution_node(state: AgentModeState):
+        from langchain_core.messages import ToolMessage
+        import inspect
+        
+        chat_id = state["chat_id"]
+        messages = state["messages"]
+        last_message = messages[-1]
+        tools = get_tools_set("agent_mode")
+        tool_map = {tool.name: tool for tool in tools}
+        tool_messages = []
+        
+        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+            for tool_call in last_message.tool_calls:
+                tool_name = tool_call.get("name")
+                tool_args = tool_call.get("args", {})
+                tool_id = tool_call.get("id")
+                tool = tool_map.get(tool_name)
+                
+                if tool:
+                    try:
+                        sig = inspect.signature(tool.func)
+                        if "chat_id" in sig.parameters and "chat_id" not in tool_args:
+                            tool_args["chat_id"] = chat_id
+                    except Exception:
+                        pass
+                    
+                    try:
+                        result = tool.invoke(tool_args)
+                        tool_messages.append(ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name))
+                    except Exception as e:
+                        tool_messages.append(ToolMessage(content=f"Error: {str(e)}", tool_call_id=tool_id, name=tool_name))
+        
+        return {"messages": tool_messages}
+    
+    workflow.add_node("tools", tool_execution_node)
 
     # Wire up edges
     workflow.add_edge(START, "agent")
