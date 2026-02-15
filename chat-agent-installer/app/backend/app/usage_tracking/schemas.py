@@ -19,6 +19,9 @@ class UsageTrackingCreate(BaseModel):
     @computed_field
     @cached_property
     def input_cost(self) -> float:
+        # Return 0 for models not in pricing table (e.g., local Ollama models)
+        if self.model not in MODEL_PRICING:
+            return 0.0
         return (
             MODEL_PRICING[self.model]["cache_read"] * self.input_cache_read
             + MODEL_PRICING[self.model]["cache_create"] * self.input_cache_create
@@ -28,6 +31,9 @@ class UsageTrackingCreate(BaseModel):
     @computed_field
     @cached_property
     def output_cost(self) -> float:
+        # Return 0 for models not in pricing table (e.g., local Ollama models)
+        if self.model not in MODEL_PRICING:
+            return 0.0
         return MODEL_PRICING[self.model]["output"] * self.output_tokens
 
 
