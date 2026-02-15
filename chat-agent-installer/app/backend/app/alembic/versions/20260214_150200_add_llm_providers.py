@@ -34,13 +34,20 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('id')
     )
     
-    # Create index on provider_type
+    # Create indexes
     op.create_index('ix_llm_providers_type', 'llm_providers', ['provider_type'])
     op.create_index('ix_llm_providers_active', 'llm_providers', ['is_active'])
     op.create_index('ix_llm_providers_default', 'llm_providers', ['is_default'])
     
-    # Add llm_provider_id to messages table (if exists)
-    try:
+    # Add llm_provider_id to messages table IF it exists
+    # Using raw SQL to avoid breaking the transaction
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'messages')"
+    ))
+    messages_exists = result.scalar()
+    
+    if messages_exists:
         op.add_column('messages', sa.Column('llm_provider_id', sa.String(), nullable=True))
         op.create_foreign_key(
             'fk_messages_llm_provider',
@@ -48,17 +55,27 @@ def upgrade() -> None:
             ['llm_provider_id'], ['id'],
             ondelete='SET NULL'
         )
-    except Exception as e:
-        print(f"Note: Could not add llm_provider_id to messages table: {e}")
+        op.create_index('ix_messages_llm_provider', 'messages', ['llm_provider_id'])
+        print("Added llm_provider_id column to messages table")
+    else:
+        print("messages table does not exist yet - skipping column addition")
 
 
 def downgrade() -> None:
-    # Remove foreign key and column from messages
-    try:
-        op.drop_constraint('fk_messages_llm_provider', 'messages', type_='foreignkey')
-        op.drop_column('messages', 'llm_provider_id')
-    except Exception:
-        pass
+    # Remove foreign key and column from messages (if exists)
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'messages')"
+    ))
+    messages_exists = result.scalar()
+    
+    if messages_exists:
+        try:
+            op.drop_index('ix_messages_llm_provider', table_name='messages')
+            op.drop_constraint('fk_messages_llm_provider', 'messages', type_='foreignkey')
+            op.drop_column('messages', 'llm_provider_id')
+        except Exception:
+            pass
     
     # Drop indexes
     op.drop_index('ix_llm_providers_default', table_name='llm_providers')
