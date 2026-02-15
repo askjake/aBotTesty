@@ -164,7 +164,7 @@ async def sse_transformer_for_langgraph_astream(
                 and chunk.response_metadata["stopReason"] != "tool_use"
             ):
                 final_stop_reason = chunk.response_metadata["stopReason"]
-                break
+                # Continue processing remaining chunks (don't break early!)
 
             elif (
                 chunk.content
@@ -220,9 +220,7 @@ async def sse_transformer_for_langgraph_astream(
                     content_index += 1
                     in_content_block = False
 
-        # Exhaust the astream_response and send final messages
-        async for chunk, metadata in astream_output:
-            pass
+        # Stream continues until naturally exhausted
         message_delta_payload = {
             "stop_reason": final_stop_reason or "end_turn",
             "model": model_name,
