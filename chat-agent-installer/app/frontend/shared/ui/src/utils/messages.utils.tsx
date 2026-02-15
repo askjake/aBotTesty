@@ -686,35 +686,40 @@ export const handleMessageSend = async ({
         });
 
         // Apply final update with all content
-        if (Object.keys(finalContentUpdates).length > 0) {
-          // FIX: Create completely new object references to force React re-render
-          const finalMessages = {
-            ...currentChat!.messages,
-            [aiMessageId]: {
-              ...currentChat!.messages[aiMessageId],
-              content: {
-                ...currentChat!.messages[aiMessageId]?.content,
-                ...finalContentUpdates,
-              },
-              loading: false,
-            },
-          };
+        // FIX: Always update state, even if no new content (to clear loading state)
+        const finalMessages = {
+          ...currentChat!.messages,
+          [aiMessageId]: {
+            ...currentChat!.messages[aiMessageId],
+            content: Object.keys(finalContentUpdates).length > 0
+              ? {
+                  ...currentChat!.messages[aiMessageId]?.content,
+                  ...finalContentUpdates,
+                }
+              : currentChat!.messages[aiMessageId]?.content || {},
+            loading: false,
+          },
+        };
 
-          currentChat = {
-            ...currentChat!,
-            messages: finalMessages,
-          };
-          
-          // Force a complete state update with new references
-          setActiveChat({ ...currentChat! });
-          
-          // Use setTimeout to ensure the state update is flushed to React
-          setTimeout(() => {
-            setActiveChat({ 
+        currentChat = {
+          ...currentChat!,
+          messages: finalMessages,
+          _streamComplete: Date.now(), // Force new reference with timestamp
+        };
+        
+        // CRITICAL: Force immediate state update with completely new object
+        setActiveChat(JSON.parse(JSON.stringify(currentChat!)));
+        
+        // CRITICAL: Use setTimeout to ensure React processes the update
+        // This flushes any pending state updates and forces a re-render
+        setTimeout(() => {
+          if (currentChat) {
+            setActiveChat({
               ...currentChat!,
+              _finalRender: true,
             });
-          }, 0);
-        }
+          }
+        }, 10); // Small delay to ensure state propagation
 
       } catch (streamError) {
         if (renderIntervalId) {
@@ -727,8 +732,7 @@ export const handleMessageSend = async ({
         throw streamError;
       }
 
-      // Final update to ensure everything is synced
-      setActiveChat({ ...currentChat });
+      // Remove the duplicate final update - it's now handled above
 
       // Update title if needed (only for new chats)
       if (Object.keys(currentChat?.messages || {})?.length <= 2) {
