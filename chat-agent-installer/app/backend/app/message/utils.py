@@ -166,7 +166,7 @@ async def sse_transformer_for_langgraph_astream(
                 final_stop_reason = chunk.response_metadata["stopReason"]
                 # Continue processing remaining chunks (don't break early!)
 
-            elif (
+            if (
                 chunk.content
             ):  # Should be a list, e.g., [{'type': 'text', 'text': 'Hello', 'index': 0}]
                 content_item = chunk.content[0]
