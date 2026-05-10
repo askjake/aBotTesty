@@ -67,6 +67,7 @@ def main() -> int:
                 reset_settle_s=0.01,
                 between_key_s=0.01,
                 ocr_enabled=False,
+                adaptive_timing_enabled=False,
             ),
         )
         crawler.run()
