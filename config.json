@@ -26,8 +26,8 @@
     "info",
     "select"
   ],
-  "crawler_max_steps": 250,
-  "crawler_max_states": 80,
+  "crawler_max_steps": 0,
+  "crawler_max_states": 0,
   "crawler_max_depth": 7,
   "crawler_state_similarity_threshold": 0.86,
   "crawler_changed_similarity_threshold": 0.94,
@@ -51,5 +51,44 @@
     230
   ],
   "crawler_channel_digit_gap_s": 0.075,
-  "crawler_channel_tune_settle_s": 2.2
+  "crawler_channel_tune_settle_s": 2.2,
+  "crawler_continuous_exploration_enabled": true,
+  "crawler_reseed_when_idle": true,
+  "crawler_idle_reseed_every_cycles": 1,
+  "crawler_max_cycles": 0,
+  "crawler_anchor_sequences": [
+    [
+      "back"
+    ],
+    [
+      "home"
+    ],
+    [
+      "home",
+      "guide"
+    ],
+    [
+      "live"
+    ],
+    [
+      "guide"
+    ],
+    [
+      "home",
+      "dvr"
+    ],
+    [
+      "home",
+      "settings"
+    ],
+    [
+      "info"
+    ],
+    [
+      "options"
+    ],
+    [
+      "input"
+    ]
+  ]
 }
