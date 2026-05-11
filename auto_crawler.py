@@ -31,6 +31,12 @@ import numpy as np
 
 from focus_detector import detect_focus
 
+
+# Phase A Enhancement: Pattern Recognition
+from persistence_tracker import PersistenceTracker, UnreachableState
+from sequence_learner import SequenceLearner, LearnedSequence
+from pattern_recognition import UIPattern, PatternRecognizer, PatternConfidence
+
 log = logging.getLogger("merged.crawler")
 
 FrameCallback = Callable[[], Optional[np.ndarray]]
@@ -227,6 +233,10 @@ class ScreenFingerprint:
     focus: Dict[str, Any] = field(default_factory=dict)
     width: int = 0
     height: int = 0
+    # Pattern recognition fields (Phase A Enhancement)
+    ui_pattern: str = "unknown"
+    pattern_confidence: float = 0.0
+    pattern_reasons: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -502,6 +512,7 @@ class NavigationGraph:
         self.edges: Dict[str, TransitionEdge] = {}
         self.root_state: Optional[str] = None
         self.load()
+        self.adaptive_thresholds = AdaptiveThresholdModel()  # Phase A Step A5
 
     @staticmethod
     def _now() -> str:
@@ -1157,6 +1168,10 @@ class AutonomousCrawler:
         self.probe_extractor = FeatureExtractor(self.data_dir, save_screenshots=False, ocr_enabled=False)
         self.graph = NavigationGraph(self.data_dir)
         self.brain = CrawlerBrain(self.data_dir)
+        self.pattern_recognizer = PatternRecognizer()  # Phase A
+        self.sequence_learner = SequenceLearner(self.data_dir)  # Phase B
+        self.persistence_tracker = PersistenceTracker(self.data_dir)  # Phase C
+        self.recent_actions: Deque[str] = deque(maxlen=10)  # Phase B
         self.events: Deque[CrawlEvent] = deque(maxlen=300)
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
@@ -1216,6 +1231,136 @@ class AutonomousCrawler:
                 },
                 "recent_events": [asdict(e) for e in list(self.events)[-40:]],
             }
+
+
+    # ============================================================================
+    # PHASE A STEP A4: Adaptive Action Selection
+    # Pattern-specific action ordering for efficient exploration
+    # ============================================================================
+    
+    def _prefer_directional(self, actions: List[str]) -> List[str]:
+        """
+        Prefer directional navigation for grid-based UIs.
+        
+        Args:
+            actions: Available actions
+            
+        Returns:
+            Reordered actions prioritizing directional buttons
+        """
+        directional = ['up', 'down', 'left', 'right']
+        dir_actions = [a for a in actions if a in directional]
+        other_actions = [a for a in actions if a not in directional]
+        return dir_actions + other_actions
+    
+    def _prefer_select_and_back(self, actions: List[str]) -> List[str]:
+        """
+        Prefer select and back for form/menu UIs.
+        
+        Args:
+            actions: Available actions
+            
+        Returns:
+            Reordered actions prioritizing select/back/enter
+        """
+        priority = ['select', 'enter', 'ok', 'back']
+        directional = ['up', 'down', 'left', 'right']
+        
+        priority_actions = [a for a in actions if a in priority]
+        dir_actions = [a for a in actions if a in directional]
+        other_actions = [a for a in actions if a not in priority and a not in directional]
+        
+        # For forms/menus: select/back first, then directional (to navigate), then others
+        return priority_actions + dir_actions + other_actions
+    
+    def _prefer_meta_buttons(self, actions: List[str]) -> List[str]:
+        """
+        Prefer meta buttons (guide, info, menu) for video players.
+        
+        Args:
+            actions: Available actions
+            
+        Returns:
+            Reordered actions prioritizing overlay/meta buttons
+        """
+        meta = ['guide', 'info', 'menu', 'options', 'back', 'home']
+        playback = ['play', 'pause', 'stop', 'rewind', 'forward']
+        directional = ['up', 'down', 'left', 'right']
+        
+        meta_actions = [a for a in actions if a in meta]
+        playback_actions = [a for a in actions if a in playback]
+        dir_actions = [a for a in actions if a in directional]
+        other_actions = [a for a in actions if a not in meta + playback + directional]
+        
+        # For video: meta buttons to access overlays, then playback, avoid directional spam
+        return meta_actions + playback_actions + other_actions + dir_actions
+    
+    def _apply_pattern_preference(self, actions: List[str], pattern: str) -> List[str]:
+        """
+        Apply pattern-specific action ordering.
+        
+        Args:
+            actions: Available actions
+            pattern: Detected UI pattern (from UIPattern enum)
+            
+        Returns:
+            Reordered actions based on pattern
+        """
+        if not actions:
+            return actions
+        
+        if pattern == "grid_menu":
+            return self._prefer_directional(actions)
+        elif pattern in ["linear_menu", "form"]:
+            return self._prefer_select_and_back(actions)
+        elif pattern == "video_player":
+            return self._prefer_meta_buttons(actions)
+        elif pattern == "info_card":
+            # Info cards: back to exit, avoid random navigation
+            return self._prefer_select_and_back(actions)
+        else:
+            # Unknown pattern: use default ordering
+            return actions
+
+
+
+    def choose_action_with_sequences(self, state_id: str, available_actions: List[str]) -> str:
+        """
+        Choose next action considering learned sequences.
+        Phase B enhancement.
+        
+        Args:
+            state_id: Current state
+            available_actions: Available actions
+            
+        Returns:
+            Chosen action
+        """
+        # Phase B: Check for sequence completion opportunity
+        if hasattr(self, 'sequence_learner') and hasattr(self, 'recent_actions'):
+            suggestion = self.sequence_learner.suggest_next_action(list(self.recent_actions))
+            
+            if suggestion:
+                suggested_action, confidence = suggestion
+                
+                # Use suggestion if action is available and confidence is high enough
+                if suggested_action in available_actions and confidence > 0.25:
+                    self.event("info", "Completing learned sequence", 
+                              action=suggested_action, confidence=confidence,
+                              recent=list(self.recent_actions)[-3:])
+                    return suggested_action
+        
+        # Fall back to pattern-based selection
+        if hasattr(self, 'pattern_recognizer') and state_id in self.graph.nodes:
+            state_node = self.graph.nodes[state_id]
+            state_fp = state_node.representative
+            pattern = getattr(state_fp, 'ui_pattern', 'unknown')
+            
+            if pattern and pattern != 'unknown':
+                return self._apply_pattern_preference(available_actions, pattern)[0] if available_actions else "back"
+        
+        # Random fallback
+        return available_actions[0] if available_actions else "back"
 
     def start(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._lock:
@@ -1577,6 +1722,17 @@ class AutonomousCrawler:
         frame, status = self.wait_for_good_frame()
         hint = f"{hint_prefix}_{uuid.uuid4().hex[:10]}"
         fp = self.extractor.extract(frame, hint_id=hint)
+        
+        # Phase A: Add pattern detection
+        if hasattr(self, 'pattern_recognizer'):
+            pattern_result = self.pattern_recognizer.classify_screen(fp, fp.focus)
+            fp.ui_pattern = pattern_result.pattern.value
+            fp.pattern_confidence = pattern_result.confidence
+            fp.pattern_reasons = pattern_result.reasons
+            
+            # Learn this pattern for future reference
+            self.pattern_recognizer.learn_pattern(fp.state_id, pattern_result.pattern)
+
         # Preserve capture status in the OCR text if there is no OCR, useful for labels/debugging.
         if not fp.ocr_text:
             fp.ocr_text = ""
@@ -1587,6 +1743,21 @@ class AutonomousCrawler:
         self.event("debug", "send key", key=key)
         result = self.send_key(key)
         time.sleep(self.config.between_key_s)
+
+        # Phase B: Record action for sequence learning
+        if hasattr(self, 'sequence_learner'):
+            self.sequence_learner.record_action(
+                from_state=state_id,
+                action=action,
+                to_state=result.get("to_state", state_id),
+                reward=result.get("reward", 0.0),
+                time_s=result.get("settle_time", 0.0)
+            )
+        
+        # Phase B: Track recent actions
+        if hasattr(self, 'recent_actions'):
+            self.recent_actions.append(action)
+
         return result
 
     def quick_fingerprint(self, hint_prefix: str = "probe") -> ScreenFingerprint:
@@ -1681,6 +1852,7 @@ class AutonomousCrawler:
     def try_action(self, from_state: str, action: str, force_settle_s: Optional[float] = None) -> Dict[str, Any]:
         cfg = self.config
         self._steps += 1
+
         action_norm = str(action).strip()
         action_lower = action_norm.lower()
         self.event("info", "try action", from_state=from_state, action=action_norm, step=self._steps)
