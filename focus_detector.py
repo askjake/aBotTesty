@@ -57,6 +57,12 @@ class FocusObservation:
     setting_pairs: List[Dict[str, str]] = field(default_factory=list)
     semantic_tags: List[str] = field(default_factory=list)
     risk_flags: List[str] = field(default_factory=list)
+    quality_flags: List[str] = field(default_factory=list)
+    recovery_text: str = ""
+    popup_type: str = ""
+    pin_required: bool = False
+    channel_number: str = ""
+    channel_name: str = ""
     nearby_words: List[str] = field(default_factory=list)
     tokens: List[str] = field(default_factory=list)
     ui_context: Dict[str, Any] = field(default_factory=dict)
@@ -88,6 +94,11 @@ class FocusObservation:
                 "setting_pairs": d.get("setting_pairs", []),
                 "semantic_tags": d.get("semantic_tags", []),
                 "risk_flags": d.get("risk_flags", []),
+                "quality_flags": d.get("quality_flags", []),
+                "popup_type": d.get("popup_type", ""),
+                "pin_required": d.get("pin_required", False),
+                "channel_number": d.get("channel_number", ""),
+                "channel_name": d.get("channel_name", ""),
                 "context_confidence": d.get("context_confidence", 0.0),
             }
         return d
@@ -198,6 +209,9 @@ def _words_text(words: Iterable[Dict[str, Any]], max_words: int = 80) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_pytesseract(pytesseract_mod: Any = None) -> Any:
+    # v14: False is an explicit no-OCR sentinel used by fast visual checkpoints.
+    if pytesseract_mod is False:
+        return None
     if pytesseract_mod is not None:
         return pytesseract_mod
     try:
@@ -227,12 +241,70 @@ def _ocr_image(img: np.ndarray, pytesseract_mod: Any = None, psm: int = 6, white
         _, bw = cv2.threshold(scaled, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         cfg = f"--oem 3 --psm {int(psm)} -c user_defined_dpi=300"
         if whitelist:
-            cfg += f" -c tessedit_char_whitelist={whitelist}"
+            # Tesseract config is shell-split by pytesseract. A literal space in
+            # tessedit_char_whitelist becomes a new argv item; if the next chars
+            # start with -, Tesseract throws: unknown command line argument.
+            # Keep the whitelist compact and let Tesseract still separate words.
+            safe_whitelist = re.sub(r"\s+", "", str(whitelist))
+            cfg += f" -c tessedit_char_whitelist={safe_whitelist}"
         return clean_text(pytesseract_mod.image_to_string(bw, config=cfg), limit=1200)
     except Exception as exc:
         log.debug("focus OCR failed: %s", exc)
         return ""
 
+
+
+def _ocr_image_multi(img: np.ndarray, pytesseract_mod: Any = None, psms: Tuple[int, ...] = (6, 7, 11), whitelist: Optional[str] = None) -> str:
+    """Recover text from difficult STB regions using several human-like OCR passes.
+
+    A human would zoom, invert, crop tighter, and read again. This does the same
+    mechanically: CLAHE/threshold, inverted threshold, adaptive threshold, and
+    multiple PSM modes. It returns the candidate with the most useful tokens,
+    not necessarily the longest garbage string.
+    """
+    if img is None or not getattr(img, "size", 0):
+        return ""
+    pytesseract_mod = _get_pytesseract(pytesseract_mod)
+    if pytesseract_mod is None:
+        return ""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    variants: List[np.ndarray] = []
+    for scale in (2.0, 3.0):
+        g = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        g = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(g)
+        g = cv2.bilateralFilter(g, 5, 35, 35)
+        _, otsu = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        _, inv = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        adapt = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 7)
+        variants.extend([g, otsu, inv, adapt])
+    candidates: List[str] = []
+    for v in variants:
+        for psm in psms:
+            cfg = f"--oem 3 --psm {int(psm)} -c user_defined_dpi=300"
+            if whitelist:
+                cfg += f" -c tessedit_char_whitelist={re.sub(r'\\s+', '', str(whitelist))}"
+            try:
+                txt = clean_text(pytesseract_mod.image_to_string(v, config=cfg), limit=1000)
+            except Exception as exc:
+                log.debug("focus recovery OCR failed: %s", exc)
+                continue
+            if txt and txt not in candidates:
+                candidates.append(txt)
+    def score(txt: str) -> Tuple[int, int, int]:
+        toks = tokenize(txt, limit=80)
+        useful = [t for t in toks if len(t) >= 3 and not t.isdigit()]
+        known = 0
+        for title, rx in _COMMON_TITLES:
+            if re.search(rx, txt, re.I):
+                known += 3
+        for _, rx in _SEMANTIC_PATTERNS:
+            if re.search(rx, txt, re.I):
+                known += 1
+        # Penalize punctuation confetti.
+        garbage = len(re.findall(r"[^A-Za-z0-9\s:/.-]", txt))
+        return (known, len(useful), -garbage)
+    candidates.sort(key=score, reverse=True)
+    return candidates[0] if candidates else ""
 
 def _ocr_words(frame: np.ndarray, pytesseract_mod: Any = None) -> List[Dict[str, Any]]:
     pytesseract_mod = _get_pytesseract(pytesseract_mod)
@@ -314,7 +386,7 @@ def red_focus_mask(bgr: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _detect_best_red_focus(frame: np.ndarray) -> Optional[Dict[str, Any]]:
+def _detect_best_red_focus(frame: np.ndarray, words: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
     H, W = frame.shape[:2]
     mask = red_focus_mask(frame)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -360,6 +432,25 @@ def _detect_best_red_focus(frame: np.ndarray) -> Optional[Dict[str, Any]]:
         # Avoid red TV network bugs in the live content unless very strong.
         if bbox_area < W * H * 0.002 and cy < 0.18:
             score -= 0.10
+        # v11: word-aware focus selection. Network logos and red art often have
+        # red blobs but no coherent UI label. True focus usually has text inside,
+        # immediately below, or in the same row.
+        if words:
+            label_rect = (x - 6, y - 6, w + 12, int(h * 1.95))
+            nearby_rect = (x - int(0.35 * w), y - int(0.30 * h), int(1.75 * w), int(1.70 * h))
+            label_txt = _words_text(_words_in_rect(words, label_rect, pad=4), max_words=18)
+            nearby_txt = _words_text(_words_in_rect(words, nearby_rect, pad=4), max_words=24)
+            if meaningful(label_txt):
+                score += 0.34
+            elif meaningful(nearby_txt):
+                score += 0.14
+            # Bottom carousels/recent/recall overlays commonly put focus in the
+            # bottom quarter. Prefer red rectangles there over red program logos.
+            if y > H * 0.70 and h > H * 0.07 and 0.35 <= aspect <= 1.35:
+                score += 0.22
+            # Red text/logo inside live video should not beat a labeled tile.
+            if not meaningful(label_txt) and 0.20 < cy < 0.78 and bbox_area < W * H * 0.015:
+                score -= 0.10
         if best is None or score > best["score"]:
             best = {
                 "score": max(0.0, score),
@@ -730,6 +821,10 @@ def _clean_focus_candidate(text: str) -> str:
     meaningful_toks = [t for t in toks if len(t) >= 3 or t in {"cc", "on", "off", "ok"}]
     if not meaningful_toks and not re.search(r"\d{2,4}|cc|ok|on|off", txt, re.I):
         return ""
+    # If a channel tile label is embedded in OCR junk, keep the clean channel label.
+    m_ch = re.search(r"\b([A-Z]{2,8})\s+(\d{2,4})\b", txt)
+    if m_ch:
+        return f"{m_ch.group(1)} {m_ch.group(2)}"
     if len(txt) <= 3 and not re.search(r"\d{2,4}|cc|ok|on|off", txt, re.I):
         return ""
     return txt[:120]
@@ -842,6 +937,132 @@ def _build_human_label(title: str, item: str, value: str, role: str) -> str:
     return " → ".join(parts)[:120]
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v11 recovery / popup / live-TV understanding
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PIN_POPUP_RE = re.compile(
+    r"\b(enter|input|type|provide).{0,24}(pin|passcode|password)|\b(pin|passcode|password).{0,24}(required|needed|enter)|\bparental.{0,40}(locked|controls?|passcode|pin)|\blocked.{0,30}(channel|program|event|content)\b",
+    re.I,
+)
+_CHANNEL_LINE_RE = re.compile(r"\b(?P<name>[A-Z][A-Z0-9&+ .'-]{1,18})\s+(?P<ch>\d{2,4})\b")
+_LIVE_TV_RE = re.compile(r"\blive\s+tv\b|\b\d{1,2}:\d{2}\s*[ap]?\b|\b\d+h\s+\d{1,2}m\s+left\b|\bMoCA\b", re.I)
+
+
+
+
+def _extract_left_strip_title(words: List[Dict[str, Any]], frame_shape: Tuple[int, int, int]) -> str:
+    """Detect DISH overlay category labels in the left grey strip.
+
+    Examples from collected data: "Recall", "Trending Live". These are not in
+    the top DISH page lane and not inside a grey box header, but a human still
+    reads them as the current block/menu title.
+    """
+    H, W = frame_shape[:2]
+    left = [w for w in words if w.get("cx", 0) < W * 0.16 and w.get("cy", 0) > H * 0.55]
+    txt = _words_text(left, max_words=18)
+    txt = clean_text(txt, limit=100).strip(" -|:_")
+    low = txt.lower()
+    if "recall" in low:
+        return "Recall"
+    if "trending" in low and "live" in low:
+        return "Trending Live"
+    if "trending" in low:
+        return "Trending"
+    if len(tokenize(txt, 8)) in (1, 2, 3) and len(txt) <= 40:
+        return txt
+    return ""
+
+def _detect_pin_popup_text(text: str) -> Tuple[str, bool]:
+    t = clean_text(text, limit=3000)
+    if _PIN_POPUP_RE.search(t):
+        if re.search(r"\bparental\b", t, re.I):
+            return "parental_pin_prompt", True
+        return "pin_prompt", True
+    return "", False
+
+
+def _extract_live_tv_context(text: str) -> Dict[str, str]:
+    t = clean_text(text, limit=2500)
+    if not _LIVE_TV_RE.search(t):
+        return {}
+    # Prefer explicit channel-name + number pairs; ignore dates/times.
+    best_name = ""
+    best_ch = ""
+    for m in _CHANNEL_LINE_RE.finditer(t):
+        name = clean_text(m.group("name"), 40).strip(" -:|.")
+        ch = m.group("ch")
+        if ch and not re.match(r"20\d\d|10|11|12|13|14|15|16|17|18|19$", ch):
+            best_name, best_ch = name, ch
+            break
+    # Program title often sits before "Live TV" or before the channel/time line.
+    program = ""
+    m = re.search(r"(?:Live TV\s+)?(?:Sun|Mon|Tue|Wed|Thu|Fri|Sat)?\s*\d{1,2}/\d{1,2}.*?\b(?:left|[AP]M)\s+(?P<prog>[A-Za-z0-9 '&,.:-]{3,70})\s+(?P<chname>[A-Z]{2,8})\s+(?P<ch>\d{2,4})", t, re.I)
+    if m:
+        program = clean_text(m.group("prog"), 70)
+        best_name = best_name or clean_text(m.group("chname"), 20)
+        best_ch = best_ch or m.group("ch")
+    return {"screen_title": "Live TV", "channel_number": best_ch, "channel_name": best_name, "program_title": program}
+
+
+def _quality_flags_for_observation(found: bool, conf: float, title: str, item: str, ocr_text: str, popup_type: str = "") -> List[str]:
+    flags: List[str] = []
+    if not found:
+        flags.append("no_focus_detected")
+    elif conf < 0.25:
+        flags.append("low_focus_confidence")
+    if not title and not popup_type:
+        flags.append("missing_screen_title")
+    if not item and found:
+        flags.append("missing_focused_item")
+    if item and (len(tokenize(item, 8)) == 0 or re.fullmatch(r"[\W_0-9a-zA-Z]{1,3}", item.strip())):
+        flags.append("weak_focused_item_ocr")
+    # OCR soup: many symbols, few useful words.
+    useful = tokenize(ocr_text, 40)
+    if ocr_text and len(useful) < 3 and len(ocr_text) > 80:
+        flags.append("ocr_soup")
+    if popup_type:
+        flags.append(f"popup:{popup_type}")
+    return sorted(set(flags))
+
+
+def _recover_focus_label_with_context(frame: np.ndarray, bbox: Tuple[int, int, int, int], words: List[Dict[str, Any]], pytesseract_mod: Any = None) -> Tuple[str, str]:
+    """Try harder to name the focused thing when normal inside/below OCR fails."""
+    x, y, w, h = bbox
+    H, W = frame.shape[:2]
+    # A human reads the tile, the text immediately under it, then the row/pane.
+    regions = [
+        ("tile_plus_label", (x - 8, y - 8, w + 16, int(h * 1.95))),
+        ("wide_row", (max(0, x - int(w * .9)), max(0, y - int(h * .45)), min(W, int(w * 2.8)), int(h * 2.1))),
+        ("right_detail", (min(W-1, x + w), max(0, y - int(h * .6)), max(1, W - x - w), int(h * 2.6))),
+        ("below", (max(0, x - int(w * .35)), y + h, int(w * 1.7), int(h * 1.3))),
+    ]
+    candidates: List[Tuple[str, str]] = []
+    for name, rect in regions:
+        crop = _safe_crop(frame, rect, pad=4)
+        txt = _ocr_image_multi(crop, pytesseract_mod, psms=(7, 6, 11))
+        txt = _clean_focus_candidate(txt)
+        if txt:
+            candidates.append((name, txt))
+    # Word geometry fallback.
+    for name, rect in regions[:2]:
+        txt = _clean_focus_candidate(_words_text(_words_in_rect(words, rect, pad=8), max_words=20))
+        if txt:
+            candidates.append((name + "_words", txt))
+    if not candidates:
+        return "", ""
+    # Prefer candidates containing known UI words or setting-like values.
+    def score(pair: Tuple[str, str]) -> Tuple[int, int, int]:
+        name, txt = pair
+        common = 1 if _match_common_title(txt) else 0
+        values = 1 if _VALUE_RE.search(txt) else 0
+        toks = tokenize(txt, 30)
+        return (common + values, len([t for t in toks if len(t) >= 3]), -len(txt))
+    candidates.sort(key=score, reverse=True)
+    return candidates[0]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -851,10 +1072,12 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
         return FocusObservation(found=False, warning="empty frame").to_dict()
 
     H, W = frame.shape[:2]
-    best = _detect_best_red_focus(frame)
     words = _ocr_words(frame, pytesseract_mod)
+    best = _detect_best_red_focus(frame, words)
     whole_text_from_words = _words_text(words, max_words=260)
     legacy_title, header_text, active_tab = _extract_header_title(words, frame.shape, fallback_text=whole_text_from_words)
+    live_ctx = _extract_live_tv_context(whole_text_from_words)
+    popup_type, pin_required = _detect_pin_popup_text(whole_text_from_words)
     page_name, page_raw, page_source = _extract_page_name_after_dish(frame, words, pytesseract_mod)
     grey_boxes = _detect_grey_menu_boxes(frame)
     # best may not exist yet; block title can still be learned without a red focus.
@@ -862,6 +1085,16 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
     block_title, block_raw, grey_box_bbox, block_source = _extract_block_title_from_grey_box(frame, words, grey_boxes, focus_bbox_for_title, pytesseract_mod)
     if not block_title and not page_name:
         block_title, block_raw, block_source = _extract_upper_block_title_from_words(words, frame.shape)
+    if not block_title and not page_name:
+        strip_title = _extract_left_strip_title(words, frame.shape)
+        if strip_title:
+            block_title, block_source = strip_title, "left_overlay_strip"
+    # Only trust the legacy title when it matches a known UI title; otherwise
+    # live video OCR can hallucinate page names from captions/background art.
+    if not page_name and not block_title and live_ctx and legacy_title not in {"Guide", "Search", "DVR", "Home", "Settings", "Diagnostics", "Parental Control Settings", "TV Viewing Options", "Locked Channels"}:
+        legacy_title = "Live TV"
+    if popup_type:
+        legacy_title = "Parental Control PIN Prompt" if popup_type == "parental_pin_prompt" else "PIN Prompt"
     title, menu_title, title_source = _pick_screen_and_menu_title(page_name, block_title, legacy_title)
     if page_name:
         title_source = page_source or "page_name_after_dish"
@@ -877,6 +1110,7 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
     if not best:
         tags = _semantic_tags(" ".join([title, menu_title, page_name, block_title, header_text, whole_text_from_words, action_bar_text]))
         risks = _risk_flags(" ".join([title, menu_title, page_name, block_title, header_text, whole_text_from_words, action_bar_text]))
+        quality_flags = _quality_flags_for_observation(False, 0.0, title or menu_title, "", whole_text_from_words, popup_type)
         obs = FocusObservation(
             found=False,
             confidence=0.0,
@@ -891,10 +1125,16 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
             active_tab=active_tab,
             semantic_tags=tags,
             risk_flags=risks,
+            quality_flags=quality_flags,
+            recovery_text=whole_text_from_words[:1000],
+            popup_type=popup_type,
+            pin_required=pin_required,
+            channel_number=live_ctx.get("channel_number", ""),
+            channel_name=live_ctx.get("channel_name", ""),
             tokens=tokenize(" ".join([title, menu_title, page_name, block_title, header_text, whole_text_from_words, action_bar_text])),
             warning="red focus not detected",
         )
-        obs.human_label = title or menu_title or "No focus detected"
+        obs.human_label = title or menu_title or ("PIN prompt" if pin_required else "No focus detected")
         obs.context_confidence = _context_confidence(0.0, title or menu_title, "", "", [], tags)
         return obs.to_dict()
 
@@ -924,7 +1164,7 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
     # Prefer direct OCR only when it is meaningful. Icon-only crops often produce
     # tiny garbage like "e 7" while word-geometry correctly sees the tile label.
     focus_text = focus_text_ocr if _clean_focus_candidate(focus_text_ocr) else focus_text_words
-    label_text = _ocr_image(label_crop, pytesseract_mod, psm=7, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -_&:+./")
+    label_text = _ocr_image(label_crop, pytesseract_mod, psm=7, whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_&:+./")
     if not _clean_focus_candidate(label_text):
         label_words = _words_in_rect(words, label_rect, pad=8)
         label_text = _words_text(label_words, max_words=12)
@@ -954,8 +1194,22 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
             title_source = page_source or "page_name_after_dish"
         elif block_title:
             title_source = block_source or "block_title"
+    if live_ctx and (not title or title == "Live TV"):
+        title = "Live TV"
+        menu_title = menu_title or "Live TV"
+    if popup_type:
+        title = "Parental Control PIN Prompt" if popup_type == "parental_pin_prompt" else "PIN Prompt"
+        menu_title = title
+        title_source = "popup_text"
     pairs = _extract_setting_pairs(row_text, neighbor_text.get("left", ""), neighbor_text.get("right", ""))
     item, value = _choose_focused_item(focus_text, label_text, context_text, row_text, neighbor_text, pairs)
+    recovery_source = ""
+    recovery_text = ""
+    if not item or "weak_focused_item_ocr" in _quality_flags_for_observation(True, float(best["score"]), title, item, all_text, popup_type):
+        recovery_source, recovery_text = _recover_focus_label_with_context(frame, (x, y, w, h), words, pytesseract_mod)
+        if recovery_text and (not item or len(tokenize(recovery_text, 12)) >= len(tokenize(item, 12))):
+            item = recovery_text
+            value = ""
     top_nav_item = _infer_home_top_nav_item(cx / W, cy / H)
     if top_nav_item and (title == "Home" or active_tab == "Home" or _looks_like_nav_tab_row(header_text + " " + row_text)):
         item, value = top_nav_item, ""
@@ -967,6 +1221,7 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
     nearby = tokenize(" ".join([focus_text, label_text, context_text, row_text]), limit=60)
     all_tokens = tokenize(all_text, limit=160)
 
+    quality_flags = _quality_flags_for_observation(True, float(best["score"]), title, item, all_text, popup_type)
     obs = FocusObservation(
         found=True,
         confidence=round(max(0.0, min(1.0, best["score"])), 4),
@@ -1000,6 +1255,12 @@ def detect_focus(frame: np.ndarray, pytesseract_mod: Any = None) -> Dict[str, An
         setting_pairs=pairs,
         semantic_tags=tags,
         risk_flags=risks,
+        quality_flags=quality_flags,
+        recovery_text=clean_text(recovery_text or all_text, 1200),
+        popup_type=popup_type,
+        pin_required=pin_required,
+        channel_number=live_ctx.get("channel_number", ""),
+        channel_name=live_ctx.get("channel_name", ""),
         nearby_words=nearby,
         tokens=all_tokens,
         row_guess=int(min(5, max(0, cy / max(1, H) * 5))),

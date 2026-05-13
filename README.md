@@ -567,3 +567,127 @@ Useful fields in `/api/crawl/focus`, `/api/crawl/map`, and enriched graph nodes:
   "human_label": "TV Viewing Options → TV Activity"
 }
 ```
+
+## v11 perception + parental-control upgrades
+
+### Tesseract whitelist fix
+The DEBUG line `unknown command line argument '-_&:+./'` was caused by a literal space in the OCR whitelist config. v11 strips whitespace from the whitelist before passing it to Tesseract, so punctuation like `-_&:+./` is no longer parsed as a separate command-line argument.
+
+### Context QA and recovery
+New endpoint:
+
+```text
+POST /api/crawl/review_context_quality
+```
+
+Body:
+
+```json
+{"max_nodes": 0, "auto_enrich": true}
+```
+
+It flags and optionally reprocesses states with missing focus, low focus confidence, missing screen title, weak focused-item OCR, OCR soup, and PIN popups. The report is useful before route planning because it tells you which parts of the learned graph are trustworthy.
+
+### Better red-focus selection
+v11 scores red candidates using nearby OCR words, bottom overlay position, and text-label evidence. This prevents red logos/artwork, such as FOX LIVE badges or red graphics in the video, from beating the real red focus outline.
+
+### Overlay/menu block context
+v11 adds left-strip overlay title recovery for screens such as `Recall` and `Trending Live`, in addition to the v10 DISH top-left page name and grey-box block-title logic.
+
+### Parental Control Lab
+Open:
+
+```text
+http://127.0.0.1:8502/parental
+```
+
+New endpoints:
+
+```text
+GET  /api/parental/status
+POST /api/parental/remember_pin
+POST /api/parental/enter_pin_if_prompt
+POST /api/parental/setup
+POST /api/parental/verify
+POST /api/parental/disable
+```
+
+The PIN is remembered only in the local app data file:
+
+```text
+crawler_data/parental_control_memory.json
+```
+
+Recommended workflow:
+1. Use dry-run setup first.
+2. Run setup once the learned route to Parental Control Settings looks correct.
+3. Verify by tuning a known blocked test channel.
+4. Let the agent detect the parental PIN popup and enter the remembered PIN.
+5. Disable controls using the remembered PIN.
+
+
+## v13 Manual Teacher Mode
+
+Open `http://127.0.0.1:8502/teach` to manually drive the set-top while the app records a demonstration session. Every recorded remote press is stored as a before-screen → button/sequence → after-screen transition and is fed directly into `crawler_data/nav_graph.json` and `crawler_data/crawler_brain.json`.
+
+Teacher Mode endpoints:
+
+- `POST /api/teach/start` — begin a teaching session.
+- `POST /api/teach/stop` — stop and save the session under `crawler_data/manual_sessions/`.
+- `GET /api/teach/status` — inspect active/latest teaching session.
+- `GET /api/teach/sessions` — list saved sessions.
+- `POST /api/teach/record_key` — record one key transition directly.
+- `POST /api/teach/annotate` — add operator notes to the active session.
+- `POST /api/teach/explore_from_here` — start autonomous continuous exploration from the current live screen instead of returning home first.
+
+When a teaching session is active, the normal `/monitor` and `/send_key` controls automatically record transitions, so you can use the monitor window as the teaching cockpit.
+
+## v14 Timed Execution + Fast Teacher Burst
+
+This build separates button execution speed from perception depth.
+
+New behavior:
+- Known path replay presses buttons quickly and verifies at checkpoints.
+- Manual Teacher Mode sends buttons immediately and learns after the operator pauses.
+- Fast visual checkpoints skip OCR unless the transition is new, uncertain, or a configured deep checkpoint.
+- Timing outliers are clipped so one blocked OCR/capture sample cannot poison future button timing.
+- Existing crawler brains are sanitized on crawler start using `timing_outlier_clip_s`.
+
+Useful controls:
+- `crawler_execution_mode`: `deep`, `balanced`, or `tunnel`
+- `crawler_fast_known_path_enabled`: true/false
+- `crawler_max_adaptive_observe_s`: hard cap for post-button observation
+- `crawler_timing_outlier_clip_s`: max latency sample stored as button timing
+- `crawler_route_replay_gap_s`: fast gap for learned route replay
+- `teacher_fast_recording_enabled`: send immediately; learn after burst pause
+- `teacher_burst_idle_s`: pause duration before a manual burst is learned
+
+Teacher Mode:
+- Open `/teach`
+- Start recording
+- Drive with buttons normally
+- Fast button bursts are learned as one sequence transition, e.g. `right,down,select`.
+- Use `Flush pending burst` before stopping if you want to force the checkpoint immediately.
+
+## v16 Learning Dashboards
+
+Open the dashboard hub:
+
+```text
+http://127.0.0.1:8502/dashboards
+```
+
+Views:
+
+```text
+/dashboard/exec  - leadership dashboard
+/dashboard/eng   - engineering/training dashboard
+```
+
+Superset-friendly export:
+
+```text
+/api/dashboards/superset.zip
+```
+
+The export includes CSV datasets, SQL helper views, and a manifest describing the Executive and Engineering dashboards.

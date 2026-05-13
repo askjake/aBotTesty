@@ -35,6 +35,9 @@ from flask import Response, abort, jsonify, request, send_file  # noqa: E402
 from capture_monitor import CaptureMonitor  # noqa: E402
 from auto_crawler import AutonomousCrawler, CrawlerConfig  # noqa: E402
 from focus_detector import detect_focus, draw_focus_overlay  # noqa: E402
+from parental_control_agent import ParentalControlAgent  # noqa: E402
+from manual_teaching_recorder import ManualTeachingRecorder  # noqa: E402
+from dashboard_analytics import DashboardDataset  # noqa: E402
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
 
@@ -70,6 +73,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "crawler_adaptive_timing_enabled": True,
     "crawler_min_settle_s": 0.35,
     "crawler_max_settle_s": 3.5,
+    "crawler_execution_mode": "balanced",
+    "crawler_fast_known_path_enabled": True,
+    "crawler_max_adaptive_observe_s": 1.8,
+    "crawler_timing_outlier_clip_s": 4.0,
+    "crawler_route_replay_gap_s": 0.075,
+    "crawler_deep_ocr_every_n_steps": 6,
+    "teacher_fast_recording_enabled": True,
+    "teacher_burst_idle_s": 0.75,
     "crawler_channel_learning_enabled": False,
     "crawler_channel_scan_list": [200, 205, 206, 207, 208, 209, 210, 220, 230],
     "crawler_channel_digit_gap_s": 0.075,
@@ -235,10 +246,12 @@ def press_button(button: str, delay_ms: int | None = None) -> Dict[str, Any]:
 
 def press_sequence(keys: Iterable[str], delay_ms: int | None = None, gap_s: float = 0.2) -> Dict[str, Any]:
     sent: List[Dict[str, Any]] = []
-    for key in keys:
+    seq = list(keys)
+    for idx, key in enumerate(seq):
         sent.append(press_button(key, delay_ms=delay_ms))
-        time.sleep(gap_s)
-    return {"ok": True, "sent": sent, "count": len(sent)}
+        if idx < len(seq) - 1 and gap_s > 0:
+            time.sleep(gap_s)
+    return {"ok": True, "sent": sent, "count": len(sent), "gap_s": gap_s}
 
 
 def crawler_send_key(key: str) -> Dict[str, Any]:
@@ -253,8 +266,20 @@ def crawler_send_key(key: str) -> Dict[str, Any]:
     return press_sequence(
         seq,
         delay_ms=int(CFG["default_delay_ms"]),
-        gap_s=float(crawler.config.channel_digit_gap_s if is_channel and "crawler" in globals() else 0.2),
+        gap_s=float(crawler.config.channel_digit_gap_s if is_channel and "crawler" in globals() else crawler.config.route_replay_gap_s if "crawler" in globals() else 0.075),
     )
+
+
+def send_requested_key_direct(key: str, delay_ms: int | None = None, gap_s: float = 0.2) -> Dict[str, Any]:
+    """Send a requested key through SGS without invoking teacher recursion."""
+    seq = key_sequence_for(str(key))
+    result = press_sequence(
+        seq,
+        delay_ms=int(delay_ms if delay_ms is not None else CFG["default_delay_ms"]),
+        gap_s=float(gap_s),
+    )
+    result.update(requested_key=key, normalized_sequence=seq)
+    return result
 
 
 crawler = AutonomousCrawler(
@@ -276,6 +301,12 @@ crawler = AutonomousCrawler(
         adaptive_timing_enabled=bool(CFG.get("crawler_adaptive_timing_enabled", True)),
         min_settle_s=float(CFG.get("crawler_min_settle_s", 0.35)),
         max_settle_s=float(CFG.get("crawler_max_settle_s", 3.5)),
+        execution_mode=str(CFG.get("crawler_execution_mode", "balanced")),
+        fast_known_path_enabled=bool(CFG.get("crawler_fast_known_path_enabled", True)),
+        max_adaptive_observe_s=float(CFG.get("crawler_max_adaptive_observe_s", 1.8)),
+        timing_outlier_clip_s=float(CFG.get("crawler_timing_outlier_clip_s", 4.0)),
+        route_replay_gap_s=float(CFG.get("crawler_route_replay_gap_s", 0.075)),
+        deep_ocr_every_n_steps=int(CFG.get("crawler_deep_ocr_every_n_steps", 6)),
         channel_learning_enabled=bool(CFG.get("crawler_channel_learning_enabled", False)),
         channel_scan_list=list(CFG.get("crawler_channel_scan_list", [])),
         channel_digit_gap_s=float(CFG.get("crawler_channel_digit_gap_s", 0.075)),
@@ -299,6 +330,17 @@ crawler = AutonomousCrawler(
     ),
 )
 
+
+parental_agent = ParentalControlAgent(crawler, CRAWLER_DIR)
+teacher = ManualTeachingRecorder(
+    data_dir=CRAWLER_DIR,
+    crawler=crawler,
+    capture_frame=monitor.get_frame,
+    capture_status=monitor.get_status,
+    send_requested_key=send_requested_key_direct,
+)
+teacher.fast_recording_enabled = bool(CFG.get("teacher_fast_recording_enabled", True))
+teacher.burst_idle_s = float(CFG.get("teacher_burst_idle_s", 0.75))
 
 def placeholder_jpeg(message: str = "No active frame") -> bytes:
     from PIL import Image, ImageDraw
@@ -382,7 +424,17 @@ def monitor_page() -> Response:
       <button class="warn" onclick="fetch('/monitor/stop',{{method:'POST'}})">Stop Video</button>
       <button class="secondary" onclick="fetch('/api/snapshot/save',{{method:'POST'}}).then(r=>r.json()).then(j=>alert(JSON.stringify(j,null,2)))">Save Snapshot</button>
       <button class="secondary" onclick="window.location='/crawl'">Autonomous Crawl</button>
+      <button class="secondary" onclick="window.location='/teach'">Teacher Mode</button>
     </p>
+    <div class="card" style="padding:10px;margin:10px 0;background:#11161b">
+      <h3 style="margin-top:0">Teacher Recording</h3>
+      <input id="teach_name" placeholder="feature/test name" style="width:190px;padding:8px;border-radius:8px;border:1px solid #444;background:#0f1113;color:white;">
+      <button onclick="teachStart()">Start Recording</button>
+      <button class="warn" onclick="teachStop()">Stop</button>
+      <button class="secondary" onclick="teachExplore()">Explore from here</button>
+      <div id="teach_pill" class="pill inactive">not recording</div>
+      <pre id="teach_status">teacher loading…</pre>
+    </div>
     <h3>Status</h3>
     <pre id="status">loading…</pre>
     <h3>Last command</h3>
@@ -396,6 +448,10 @@ async function sendKey(key) {{
   document.getElementById('last').textContent = JSON.stringify(j,null,2);
 }}
 function sendDirect() {{ const v=document.getElementById('direct').value; if(v) sendKey(v); }}
+async function teachStart() {{ const name=document.getElementById('teach_name').value||'Manual feature demo'; const r=await fetch('/api/teach/start',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name}})}}); document.getElementById('teach_status').textContent=JSON.stringify(await r.json(),null,2); }}
+async function teachStop() {{ const r=await fetch('/api/teach/stop',{{method:'POST'}}); document.getElementById('teach_status').textContent=JSON.stringify(await r.json(),null,2); }}
+async function teachExplore() {{ const r=await fetch('/api/teach/explore_from_here',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{max_steps:0,max_states:0,max_depth:18}})}}); document.getElementById('teach_status').textContent=JSON.stringify(await r.json(),null,2); }}
+async function refreshTeach() {{ const r=await fetch('/api/teach/status'); const j=await r.json(); const p=document.getElementById('teach_pill'); p.textContent=j.active?'RECORDING':'not recording'; p.className='pill '+(j.active?'active':'inactive'); document.getElementById('teach_status').textContent=JSON.stringify({{active:j.active,latest_session:j.latest_session,last_error:j.last_error}},null,2); }}
 async function refresh() {{
   const r = await fetch('/api/status');
   const j = await r.json();
@@ -404,7 +460,7 @@ async function refresh() {{
   sig.className = 'pill ' + (j.video.active ? 'active' : 'inactive');
   document.getElementById('status').textContent = JSON.stringify(j,null,2);
 }}
-setInterval(refresh, 1000); refresh();
+setInterval(refresh, 1000); setInterval(refreshTeach, 1500); refresh(); refreshTeach();
 </script>
 </body>
 </html>
@@ -428,6 +484,7 @@ def api_status():
         },
         video=monitor.get_status(),
         crawler={k: v for k, v in crawler.status().items() if k != "recent_events"},
+        teacher={k: v for k, v in teacher.status().items() if k != "active_session"},
     )
 
 
@@ -486,9 +543,16 @@ def compat_send_key():
     if not key:
         return jsonify(ok=False, error="key is required"), 400
     try:
-        seq = key_sequence_for(str(key))
-        result = press_sequence(seq, delay_ms=int(delay_ms), gap_s=gap_s)
-        result.update(requested_key=key, normalized_sequence=seq)
+        if teacher.active:
+            learn_mode = str(data.get("learn_mode") or request.args.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
+            if learn_mode in {"sync", "deep", "blocking"}:
+                result = teacher.record_button(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
+            else:
+                result = teacher.record_button_fast(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
+            result["sent_via_teacher"] = True
+            result["learn_mode"] = learn_mode
+            return jsonify(result)
+        result = send_requested_key_direct(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
         return jsonify(result)
     except Exception as exc:
         log.exception("send_key failed")
@@ -499,9 +563,16 @@ def compat_send_key():
 def send_key_path(key: str):
     delay_ms = int(request.args.get("delay_ms", CFG["default_delay_ms"]))
     try:
-        seq = key_sequence_for(key)
-        result = press_sequence(seq, delay_ms=delay_ms)
-        result.update(requested_key=key, normalized_sequence=seq)
+        if teacher.active:
+            learn_mode = str(request.args.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
+            if learn_mode in {"sync", "deep", "blocking"}:
+                result = teacher.record_button(str(key), delay_ms=delay_ms, gap_s=0.2)
+            else:
+                result = teacher.record_button_fast(str(key), delay_ms=delay_ms, gap_s=float(request.args.get("gap_s", 0.075)))
+            result["sent_via_teacher"] = True
+            result["learn_mode"] = learn_mode
+            return jsonify(result)
+        result = send_requested_key_direct(str(key), delay_ms=delay_ms, gap_s=0.2)
         return jsonify(result)
     except Exception as exc:
         log.exception("key path failed")
@@ -516,10 +587,18 @@ def api_tune():
         return jsonify(ok=False, error="channel is required"), 400
     try:
         ch = int(channel)
-        seq = key_sequence_for(f"CH_{ch}")
         gap_s = float(data.get("gap_s", CFG.get("crawler_channel_digit_gap_s", 0.075)))
-        result = press_sequence(seq, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
-        result.update(channel=ch, normalized_sequence=seq, gap_s=gap_s)
+        requested = f"CH_{ch}"
+        if teacher.active:
+            learn_mode = str(data.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
+            if learn_mode in {"sync", "deep", "blocking"}:
+                result = teacher.record_button(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
+            else:
+                result = teacher.record_button_fast(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
+            result.update(channel=ch, sent_via_teacher=True, learn_mode=learn_mode)
+            return jsonify(result)
+        result = send_requested_key_direct(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
+        result.update(channel=ch, gap_s=gap_s)
         return jsonify(result)
     except Exception as exc:
         log.exception("tune failed")
@@ -632,7 +711,7 @@ def crawler_page() -> Response:
 <body>
 <header>
   <h1>STB Intelligence Console <span class="hint">v9 · semantic focus/context + title-aware learning map</span></h1>
-  <div><span id="runpill" class="pill inactive">idle</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/api/crawl/export" style="color:#93c5fd">export graph</a></div>
+  <div><span id="runpill" class="pill inactive">idle</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/parental" style="color:#93c5fd">parental lab</a> · <a href="/api/crawl/export" style="color:#93c5fd">export graph</a></div>
 </header>
 <main>
 <section class="stack">
@@ -842,6 +921,230 @@ def api_crawl_enrich_context():
         return jsonify(ok=False, error=str(exc), status=crawler.status(), video=monitor.get_status()), 500
 
 
+@app.route("/api/crawl/review_context_quality", methods=["POST", "GET"])
+def api_crawl_review_context_quality():
+    try:
+        data = request.get_json(silent=True) or {}
+        max_nodes = int(data.get("max_nodes") or request.args.get("max_nodes") or 0)
+        auto_enrich = str(data.get("auto_enrich", request.args.get("auto_enrich", "false"))).lower() in {"1", "true", "yes", "on"}
+        return jsonify(crawler.review_context_quality(max_nodes=max_nodes, auto_enrich=auto_enrich))
+    except Exception as exc:
+        log.exception("context quality review failed")
+        return jsonify(ok=False, error=str(exc), status=crawler.status()), 500
+
+
+@app.route("/teach")
+def teach_page() -> Response:
+    alias = CFG["stb_alias"]
+    html = """
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"><title>Teacher Mode — __ALIAS__</title>
+<style>
+body { margin:0; background:#0d1117; color:#e5edf5; font-family:Segoe UI,Arial,sans-serif; }
+header { padding:14px 18px; background:#151b23; display:flex; justify-content:space-between; align-items:center; }
+main { display:grid; grid-template-columns:minmax(680px,1fr) 430px; gap:16px; padding:16px; }
+.card { background:#161b22; border:1px solid #30363d; border-radius:14px; padding:14px; }
+.stream { width:100%; border-radius:12px; background:#000; }
+button { background:#2563eb; color:white; border:0; border-radius:10px; padding:9px 11px; margin:3px; cursor:pointer; font-weight:700; }
+button.secondary { background:#374151; } button.warn { background:#b45309; } button.danger { background:#b91c1c; }
+.grid3,.digits { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; }
+.pill { padding:4px 8px; border-radius:999px; background:#374151; display:inline-block; } .active { background:#166534; } .inactive { background:#7f1d1d; }
+pre { white-space:pre-wrap; word-break:break-word; color:#b6c2cf; max-height:360px; overflow:auto; }
+input,textarea { background:#0b1016; color:#e5edf5; border:1px solid #3b4450; border-radius:8px; padding:8px; width:95%; }
+.transition { border:1px solid #30363d; border-radius:10px; padding:8px; margin:8px 0; background:#0f1720; }
+.small { color:#94a3b8; font-size:12px; }
+</style>
+</head>
+<body>
+<header><div><b>Teacher Mode</b> <span class="pill">STB: __ALIAS__</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a></div><div id="pill" class="pill inactive">idle</div></header>
+<main>
+<section class="card"><img class="stream" src="/video.mjpg"><h3>Recent demonstrated transitions</h3><div id="recent"></div></section>
+<aside class="card">
+<h2>Manual Demonstration Recorder</h2>
+<p class="small">Start recording, drive the box normally, and every button becomes a high-confidence before → button → after transition in the crawler graph.</p>
+<input id="name" placeholder="Feature/test name, e.g. Parental Controls PIN setup"><br><br>
+<textarea id="notes" rows="3" placeholder="What are you trying to demonstrate?"></textarea><br>
+<button onclick="startRec()">Start recording</button><button class="danger" onclick="stopRec()">Stop</button><button class="secondary" onclick="annotate()">Add note</button>
+<button class="warn" onclick="exploreHere()">Start crawler from current screen</button>
+<hr>
+<h3>Remote</h3>
+<div class="grid3"><span></span><button onclick="sendKey('up')">↑</button><span></span><button onclick="sendKey('left')">←</button><button onclick="sendKey('select')">OK</button><button onclick="sendKey('right')">→</button><span></span><button onclick="sendKey('down')">↓</button><span></span></div>
+<p><button onclick="sendKey('home')">Home</button><button onclick="sendKey('guide')">Guide</button><button onclick="sendKey('back')">Back</button><button onclick="sendKey('info')">Info</button><button onclick="sendKey('live')">Live</button><button onclick="sendKey('input')">Input</button><button onclick="sendKey('options')">Options</button></p>
+<p><button onclick="sendKey('dvr')">DVR</button><button onclick="sendKey('recall')">Recall</button><button onclick="sendKey('ch_up')">CH +</button><button onclick="sendKey('ch_down')">CH −</button></p>
+<div class="digits"><button onclick="sendKey('1')">1</button><button onclick="sendKey('2')">2</button><button onclick="sendKey('3')">3</button><button onclick="sendKey('4')">4</button><button onclick="sendKey('5')">5</button><button onclick="sendKey('6')">6</button><button onclick="sendKey('7')">7</button><button onclick="sendKey('8')">8</button><button onclick="sendKey('9')">9</button><button onclick="sendKey('back')">Back</button><button onclick="sendKey('0')">0</button><button onclick="sendKey('select')">Enter</button></div>
+<p><input id="direct" placeholder="CH_206 or home,guide or select"><button onclick="sendDirect()">Send</button></p>
+<h3>Status / last result</h3><pre id="out">loading...</pre>
+</aside>
+</main>
+<script>
+const qs=id=>document.getElementById(id); async function api(u,b=null){const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{}; const r=await fetch(u,opt); return await r.json();}
+function seq(v){return String(v||'').split(/[ ,]+/).map(x=>x.trim()).filter(Boolean)}
+async function startRec(){qs('out').textContent='Starting...'; qs('out').textContent=JSON.stringify(await api('/api/teach/start',{name:qs('name').value,notes:qs('notes').value}),null,2); refresh();}
+async function stopRec(){qs('out').textContent=JSON.stringify(await api('/api/teach/stop',{}),null,2); refresh();}
+async function flushTeach(){qs('out').textContent=JSON.stringify(await api('/api/teach/flush',{}),null,2); refresh();}
+async function annotate(){const text=qs('notes').value||prompt('Note?')||''; qs('out').textContent=JSON.stringify(await api('/api/teach/annotate',{text}),null,2); refresh();}
+async function exploreHere(){qs('out').textContent=JSON.stringify(await api('/api/teach/explore_from_here',{max_steps:0,max_states:0,max_depth:18}),null,2); refresh();}
+async function sendKey(k){qs('out').textContent='Sending '+k+'...'; const j=await api('/send_key',{key:k}); qs('out').textContent=JSON.stringify(j,null,2); refresh();}
+async function sendDirect(){const v=qs('direct').value.trim(); if(!v)return; if(v.includes(',')){for(const k of seq(v)) await sendKey(k);} else await sendKey(v);}
+function esc(s){return String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function transitionHtml(e){return `<div class="transition"><b>${esc(e.button)}</b> · ${esc(e.before_label||e.before_state)} → ${esc(e.after_label||e.after_state)}<br><span class="small">focus: ${esc((e.before_focus||'').slice(0,90))} → ${esc((e.after_focus||'').slice(0,90))}<br>changed ${e.changed} · new edge ${e.new_edge} · reward ${e.reward} · response ${e.response_s}s</span></div>`}
+async function refresh(){const j=await api('/api/teach/status'); qs('pill').textContent=j.active?'RECORDING':'idle'; qs('pill').className='pill '+(j.active?'active':'inactive'); const s=j.active_session||j.latest_session||{}; const events=(j.active_session&&j.active_session.events)||[]; qs('recent').innerHTML=events.filter(e=>e.type==='button_transition').slice(-8).reverse().map(transitionHtml).join('')||'<span class="small">No recorded buttons yet.</span>'; qs('out').textContent=JSON.stringify({active:j.active,summary:(s.summary||{}),latest:j.latest_session,last_error:j.last_error},null,2);}
+setInterval(refresh,1500); refresh();
+</script></body></html>
+""".replace("__ALIAS__", str(alias))
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/teach/start", methods=["POST"])
+def api_teach_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(teacher.start(name=str(data.get("name") or ""), notes=str(data.get("notes") or ""), operator=str(data.get("operator") or "human")))
+    except Exception as exc:
+        log.exception("teacher start failed")
+        return jsonify(ok=False, error=str(exc), status=teacher.status()), 500
+
+
+@app.route("/api/teach/stop", methods=["POST", "GET"])
+def api_teach_stop():
+    try:
+        return jsonify(teacher.stop())
+    except Exception as exc:
+        log.exception("teacher stop failed")
+        return jsonify(ok=False, error=str(exc), status=teacher.status()), 500
+
+
+@app.route("/api/teach/status")
+def api_teach_status():
+    return jsonify(teacher.status())
+
+
+@app.route("/api/teach/sessions")
+def api_teach_sessions():
+    return jsonify(teacher.list_sessions(limit=int(request.args.get("limit", 20))))
+
+
+@app.route("/api/teach/flush", methods=["POST", "GET"])
+def api_teach_flush():
+    try:
+        return jsonify(teacher.flush_pending())
+    except Exception as exc:
+        log.exception("teacher flush failed")
+        return jsonify(ok=False, error=str(exc), status=teacher.status()), 500
+
+
+@app.route("/api/teach/annotate", methods=["POST"])
+def api_teach_annotate():
+    data = request.get_json(silent=True) or {}
+    try:
+        tags = data.get("tags") or []
+        if isinstance(tags, str):
+            tags = [t.strip() for t in tags.split(",") if t.strip()]
+        return jsonify(teacher.annotate(str(data.get("text") or ""), tags=tags))
+    except Exception as exc:
+        log.exception("teacher annotate failed")
+        return jsonify(ok=False, error=str(exc), status=teacher.status()), 500
+
+
+@app.route("/api/teach/record_key", methods=["POST"])
+def api_teach_record_key():
+    data = request.get_json(silent=True) or {}
+    key = data.get("key")
+    if not key:
+        return jsonify(ok=False, error="key is required"), 400
+    try:
+        learn_mode = str(data.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
+        if learn_mode in {"sync", "deep", "blocking"}:
+            return jsonify(teacher.record_button(str(key), delay_ms=data.get("delay_ms"), gap_s=float(data.get("gap_s", 0.2)), note=str(data.get("note") or "")))
+        return jsonify(teacher.record_button_fast(str(key), delay_ms=data.get("delay_ms"), gap_s=float(data.get("gap_s", 0.075)), note=str(data.get("note") or "")))
+    except Exception as exc:
+        log.exception("teacher record key failed")
+        return jsonify(ok=False, error=str(exc), status=teacher.status()), 500
+
+
+@app.route("/api/teach/explore_from_here", methods=["POST"])
+def api_teach_explore_from_here():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(teacher.start_autonomous_from_current(data))
+    except Exception as exc:
+        log.exception("teacher explore-from-here failed")
+        return jsonify(ok=False, error=str(exc), teacher=teacher.status(), crawler=crawler.status()), 500
+
+
+@app.route("/parental")
+def parental_page() -> Response:
+    return Response("""
+<!doctype html><html><head><meta charset="utf-8"><title>Parental Control Lab</title>
+<style>body{font-family:Segoe UI,Arial,sans-serif;background:#0f1720;color:#e5edf5;margin:0;padding:18px}.card{background:#182231;border:1px solid #304156;border-radius:14px;padding:14px;margin:12px 0}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer}button.warn{background:#b45309}input{background:#0b1220;color:#e5edf5;border:1px solid #3b4b61;border-radius:8px;padding:8px;margin:4px}pre{white-space:pre-wrap;background:#09111c;border:1px solid #253548;border-radius:12px;padding:12px;max-height:520px;overflow:auto}.hint{color:#9fb0c6}</style></head>
+<body><h1>Parental Control Lab <span class=hint>v12 active fallback</span></h1>
+<p class=hint>This page uses the learned map first. If no learned route exists, v12 actively tries HOME → focused Settings → focused Parental/Locks. Dry-run does not move the STB. PIN is stored locally in crawler_data/parental_control_memory.json.</p>
+<div class=card><label>PIN <input id=pin value="1234"></label><label>Test blocked channel <input id=channel value="125"></label><br><label>Final setup sequence <input id=setupseq placeholder="optional exact keys after reaching PC settings: down,select,1,2,3,4,select" size=80></label><br><label>Final disable sequence <input id=disseq placeholder="optional exact keys after reaching PC settings: down,select,..." size=80></label></div>
+<div class=card><button onclick="status()">Status</button><button onclick="focusNow()">Current Focus</button><button onclick="find(false)">Active find PC Settings</button><button onclick="setup(true)">Dry-run setup plan</button><button class=warn onclick="setup(false)">Active setup/find</button><button onclick="verify(false)">Verify blocked channel / unlock</button><button onclick="disable(true)">Dry-run disable plan</button><button class=warn onclick="disable(false)">Active disable/find</button><button onclick="pinprompt()">Detect/enter PIN if prompted</button></div>
+<div class=card><b>Expected workflow:</b><ol><li>Dry-run setup plan: confirms route or active fallback plan.</li><li>Active find/setup: moves the STB. It may stop at the parental-control area unless you provide an exact final setup sequence.</li><li>Verify blocked channel: numeric tunes the channel and watches for the PIN popup.</li><li>Disable: navigates back to PC settings, enters PIN if prompted, and applies optional final disable sequence.</li></ol></div>
+<pre id=out>{}</pre>
+<script>const qs=id=>document.getElementById(id); const seq=id=>qs(id).value.split(/[
+,]+/).map(x=>x.trim()).filter(Boolean); async function post(u,b={}){qs('out').textContent='Working...';let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}); let j=await r.json(); qs('out').textContent=JSON.stringify(j,null,2); return j;} async function status(){let r=await fetch('/api/parental/status'); qs('out').textContent=JSON.stringify(await r.json(),null,2);} async function focusNow(){let r=await fetch('/api/crawl/focus'); qs('out').textContent=JSON.stringify(await r.json(),null,2);} async function find(dry){return post('/api/parental/find',{dry_run:dry});} async function setup(dry){return post('/api/parental/setup',{pin:qs('pin').value,blocked_channel:parseInt(qs('channel').value),dry_run:dry,final_sequence:seq('setupseq')});} async function verify(dry){return post('/api/parental/verify',{pin:qs('pin').value,channel:parseInt(qs('channel').value),dry_run:dry});} async function disable(dry){return post('/api/parental/disable',{pin:qs('pin').value,dry_run:dry,final_sequence:seq('disseq')});} async function pinprompt(){return post('/api/parental/enter_pin_if_prompt',{pin:qs('pin').value});} status();</script></body></html>
+""", mimetype="text/html")
+
+
+@app.route("/api/parental/status")
+def api_parental_status():
+    return jsonify(parental_agent.status())
+
+
+@app.route("/api/parental/remember_pin", methods=["POST"])
+def api_parental_remember_pin():
+    data = request.get_json(silent=True) or {}
+    return jsonify(parental_agent.remember_pin(str(data.get("pin") or "")))
+
+
+@app.route("/api/parental/enter_pin_if_prompt", methods=["POST"])
+def api_parental_enter_pin_if_prompt():
+    data = request.get_json(silent=True) or {}
+    pin = str(data.get("pin") or "") or None
+    return jsonify(parental_agent.maybe_enter_pin(pin=pin))
+
+
+@app.route("/api/parental/setup", methods=["POST"])
+def api_parental_setup():
+    data = request.get_json(silent=True) or {}
+    seq = data.get("final_sequence") or []
+    if isinstance(seq, str):
+        seq = [x.strip() for x in seq.replace("\n", ",").split(",") if x.strip()]
+    return jsonify(parental_agent.setup_parental_controls(
+        pin=str(data.get("pin") or ""),
+        blocked_channel=data.get("blocked_channel"),
+        dry_run=bool(data.get("dry_run", True)),
+        final_sequence=seq,
+    ))
+
+
+@app.route("/api/parental/verify", methods=["POST"])
+def api_parental_verify():
+    data = request.get_json(silent=True) or {}
+    return jsonify(parental_agent.verify_blocked_channel(
+        channel=int(data.get("channel") or data.get("blocked_channel") or parental_agent.memory.last_blocked_channel or 0),
+        pin=str(data.get("pin") or "") or None,
+        dry_run=bool(data.get("dry_run", False)),
+    ))
+
+
+@app.route("/api/parental/disable", methods=["POST"])
+def api_parental_disable():
+    data = request.get_json(silent=True) or {}
+    seq = data.get("final_sequence") or []
+    if isinstance(seq, str):
+        seq = [x.strip() for x in seq.replace("\n", ",").split(",") if x.strip()]
+    return jsonify(parental_agent.disable_parental_controls(
+        pin=str(data.get("pin") or "") or None,
+        dry_run=bool(data.get("dry_run", True)),
+        final_sequence=seq,
+    ))
+
+
 @app.route("/api/crawl/focus/overlay.jpg")
 def api_crawl_focus_overlay():
     frame = monitor.get_frame()
@@ -965,6 +1268,172 @@ def api_crawl_goal():
     except Exception as exc:
         log.exception("crawl goal failed")
         return jsonify(ok=False, error=str(exc), status=crawler.status()), 500
+
+
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Learning / Superset-style dashboards
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _dash_data() -> DashboardDataset:
+    return DashboardDataset.load(CRAWLER_DIR)
+
+
+def _json_dumps_for_html(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _dashboard_shell(title: str, mode: str, payload: Dict[str, Any]) -> str:
+    """Self-contained, no-CDN dashboard page that feels Superset-ish."""
+    data = _json_dumps_for_html(payload)
+    return f"""<!doctype html>
+<html>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>{title}</title>
+<style>
+  :root {{ --bg:#0b1020; --panel:#121a2f; --panel2:#18223b; --ink:#eef3ff; --muted:#9fb0d0; --line:#2b3a62; --good:#4ade80; --warn:#fbbf24; --bad:#fb7185; --info:#60a5fa; }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; font-family: Inter, Segoe UI, Arial, sans-serif; background:linear-gradient(180deg,#071024,#0b1020 35%,#080b14); color:var(--ink); }}
+  header {{ padding:18px 22px; border-bottom:1px solid var(--line); background:rgba(8,12,24,.92); position:sticky; top:0; z-index:3; backdrop-filter: blur(8px); }}
+  .top {{ display:flex; justify-content:space-between; gap:18px; align-items:center; flex-wrap:wrap; }}
+  h1 {{ margin:0; font-size:22px; }}
+  .subtitle {{ color:var(--muted); margin-top:4px; font-size:13px; }}
+  .nav a {{ color:#cfe2ff; text-decoration:none; padding:8px 10px; border:1px solid var(--line); border-radius:9px; margin-left:6px; background:#10182a; }}
+  main {{ padding:18px 22px 40px; }}
+  .grid {{ display:grid; grid-template-columns:repeat(12,1fr); gap:14px; }}
+  .card {{ background:linear-gradient(180deg,var(--panel),#0f172a); border:1px solid var(--line); border-radius:16px; padding:15px; box-shadow:0 8px 24px rgba(0,0,0,.22); }}
+  .span-12 {{ grid-column:span 12; }} .span-8 {{ grid-column:span 8; }} .span-6 {{ grid-column:span 6; }} .span-4 {{ grid-column:span 4; }} .span-3 {{ grid-column:span 3; }}
+  @media(max-width:1000px) {{ .span-8,.span-6,.span-4,.span-3 {{ grid-column:span 12; }} }}
+  .kpi {{ font-size:30px; font-weight:800; line-height:1.1; }} .kpi small {{ color:var(--muted); font-size:13px; font-weight:600; display:block; margin-top:6px; }}
+  .label {{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; }}
+  .pill {{ display:inline-block; padding:3px 8px; border-radius:999px; background:#17233f; color:#dbeafe; border:1px solid #2c3e66; font-size:12px; margin:2px; }}
+  .good {{ color:var(--good); }} .warn {{ color:var(--warn); }} .bad {{ color:var(--bad); }} .info {{ color:var(--info); }}
+  table {{ width:100%; border-collapse:collapse; font-size:12px; }} th,td {{ padding:8px 7px; border-bottom:1px solid #223150; text-align:left; vertical-align:top; }} th {{ color:#bfd2f4; font-weight:700; position:sticky; top:74px; background:#111a2e; z-index:1; }}
+  tr:hover td {{ background:#121d34; }}
+  .bar {{ height:10px; background:#1d2946; border-radius:999px; overflow:hidden; }} .bar > i {{ display:block; height:100%; background:linear-gradient(90deg,#60a5fa,#4ade80); }}
+  .miniBars {{ display:flex; align-items:flex-end; gap:3px; height:120px; border-left:1px solid #26385f; border-bottom:1px solid #26385f; padding:8px; }}
+  .miniBars span {{ flex:1; min-width:4px; background:linear-gradient(180deg,#60a5fa,#2563eb); border-radius:4px 4px 0 0; position:relative; }}
+  .miniBars span:hover::after {{ content:attr(data-tip); position:absolute; bottom:105%; left:0; background:#020617; color:#fff; padding:5px 6px; border:1px solid #334155; border-radius:6px; white-space:nowrap; z-index:5; }}
+  .heat {{ display:grid; grid-template-columns:220px repeat(9, minmax(38px,1fr)); gap:2px; overflow:auto; }} .heat div {{ padding:5px; background:#111b31; font-size:11px; border-radius:4px; }} .heat .on {{ background:#14532d; }} .heat .off {{ background:#3f1722; }} .heat .head {{ background:#263557; color:#dbeafe; font-weight:700; }}
+  details summary {{ cursor:pointer; color:#bfdbfe; }}
+  code {{ background:#111827; padding:2px 5px; border-radius:5px; color:#dbeafe; }}
+</style>
+</head>
+<body>
+<header>
+  <div class='top'>
+    <div><h1>{title}</h1><div class='subtitle'>Autonomous set-top learning, training, known-knowns, known-unknowns, and progress history. Generated <span id='gen'></span>.</div></div>
+    <div class='nav'>
+      <a href='/dashboards'>Hub</a><a href='/dashboard/exec'>Exec</a><a href='/dashboard/eng'>Engineering</a><a href='/intelligence'>Intelligence</a><a href='/api/dashboards/superset.zip'>Superset Export</a>
+    </div>
+  </div>
+</header>
+<main id='app'></main>
+<script>
+const DATA = {data};
+const MODE = {json.dumps(mode)};
+const app = document.getElementById('app');
+document.getElementById('gen').textContent = DATA.generated_at || (DATA.exec && DATA.exec.generated_at) || '';
+function pct(v) {{ return (Number(v)||0).toFixed(1)+'%'; }}
+function esc(s) {{ return String(s ?? '').replace(/[&<>]/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;'}}[c])); }}
+function kpi(label, value, cls='') {{ return `<section class='card span-3'><div class='label'>${{esc(label)}}</div><div class='kpi ${{cls}}'>${{esc(value)}}<small>${{esc(label)}}</small></div></section>`; }}
+function table(title, rows, cols, span='span-12', limit=80) {{
+  rows = rows || [];
+  const body = rows.slice(0,limit).map(r => `<tr>${{cols.map(c => `<td>${{esc(typeof c.f==='function'?c.f(r):r[c.k])}}</td>`).join('')}}</tr>`).join('');
+  return `<section class='card ${{span}}'><h3>${{esc(title)}} <span class='pill'>${{rows.length}} rows</span></h3><div style='max-height:520px;overflow:auto'><table><thead><tr>${{cols.map(c=>`<th>${{esc(c.t||c.k)}}</th>`).join('')}}</tr></thead><tbody>${{body}}</tbody></table></div></section>`;
+}}
+function bars(title, rows, labelKey, valueKey, span='span-6') {{
+  rows = (rows||[]).slice(0,40); const max = Math.max(1,...rows.map(r=>Number(r[valueKey])||0));
+  return `<section class='card ${{span}}'><h3>${{esc(title)}}</h3><div class='miniBars'>${{rows.map(r=>`<span style='height:${{Math.max(3,(Number(r[valueKey])||0)/max*100)}}%' data-tip='${{esc(r[labelKey])}}: ${{esc(r[valueKey])}}'></span>`).join('')}}</div></section>`;
+}}
+function progress(label, val) {{ return `<div style='margin:8px 0'><div class='label'>${{esc(label)}} ${{pct(val)}}</div><div class='bar'><i style='width:${{Math.max(0,Math.min(100,Number(val)||0))}}%'></i></div></div>`; }}
+function renderExec() {{
+  const d = DATA.exec || DATA; const h=d.headline||{{}};
+  let html = `<div class='grid'>`;
+  html += kpi('Learning maturity', pct(h.learning_maturity_pct), h.learning_maturity_pct>70?'good':h.learning_maturity_pct>35?'warn':'bad');
+  html += kpi('States', h.states||0); html += kpi('Transitions', h.transitions||0); html += kpi('Known unknowns', h.known_unknowns||0, h.known_unknowns?'warn':'good');
+  html += `<section class='card span-6'><h3>Executive readout</h3>${{(d.narrative||[]).map(x=>`<p>${{esc(x)}}</p>`).join('')}}${{progress('Coverage',h.coverage_pct)}}${{progress('Perception quality',h.perception_quality_pct)}}${{progress('Avg transition confidence',(h.avg_transition_confidence||0)*100)}}${{progress('Avg focus confidence',(h.avg_focus_confidence||0)*100)}}</section>`;
+  html += bars('Learning history: new states/hour', d.timeline||[], 'bucket', 'new_states', 'span-6');
+  html += table('Top learned menus', (d.top_known_menus||[]).map(x=>({{menu:x[0], count:x[1]}})), [{{k:'menu',t:'Menu/Page'}},{{k:'count',t:'Seen'}}], 'span-6', 30);
+  html += table('Known channels', d.channels||[], [{{k:'channel'}},{{k:'name_guess',t:'Name guess'}},{{k:'symbols'}},{{k:'confidence'}}], 'span-6', 80);
+  html += table('Highest priority known-unknowns', d.known_unknowns||[], [{{k:'unknown_type',t:'Type'}},{{k:'label'}},{{k:'action'}},{{k:'priority'}}], 'span-12', 60);
+  html += `</div>`; app.innerHTML=html;
+}}
+function renderEng() {{
+  const d = DATA.eng || DATA; const h=d.headline||{{}};
+  let html = `<div class='grid'>`;
+  html += kpi('States', h.states||0); html += kpi('Edges', h.transitions||0); html += kpi('Coverage', pct(h.coverage_pct)); html += kpi('Quality', pct(h.perception_quality_pct));
+  html += table('Per-action coverage', d.per_action_coverage||[], [{{k:'action'}},{{k:'tried'}},{{k:'total'}},{{k:'coverage_pct',t:'coverage %'}}], 'span-6', 30);
+  html += table('Action timing / rewards', d.actions||[], [{{k:'action'}},{{k:'avg_reward'}},{{k:'reward_attempts'}},{{k:'avg_response_s'}},{{k:'max_response_s'}}], 'span-6', 40);
+  html += bars('Exploration history: edges seen/hour', d.timeline||[], 'bucket', 'edge_seen', 'span-6');
+  html += table('Quality breakdown', d.quality_breakdown||[], [{{k:'quality'}},{{k:'count'}}], 'span-3', 10);
+  html += table('Pattern breakdown', d.pattern_breakdown||[], [{{k:'pattern'}},{{k:'count'}}], 'span-3', 20);
+  html += table('Low-confidence transitions', d.edges_low_confidence||[], [{{k:'from_label',t:'From'}},{{k:'action'}},{{k:'to_label',t:'To'}},{{k:'confidence'}},{{k:'attempts'}}], 'span-12', 100);
+  html += table('Known-unknown / training backlog', d.known_unknowns||[], [{{k:'unknown_type',t:'Type'}},{{k:'label'}},{{k:'action'}},{{k:'coverage_state'}},{{k:'priority'}}], 'span-12', 160);
+  html += table('Questionable state perception', d.state_quality||[], [{{k:'quality'}},{{k:'label'}},{{k:'quality_reasons'}},{{k:'focus_confidence'}},{{k:'page_name'}},{{k:'focused_item'}}], 'span-12', 160);
+  html += `</div>`; app.innerHTML=html;
+}}
+if (MODE === 'exec') renderExec(); else renderEng();
+</script>
+</body>
+</html>"""
+
+
+@app.route("/dashboards")
+def dashboards_home():
+    ds = _dash_data()
+    ex = ds.executive()["headline"]
+    html = f"""<!doctype html><html><head><meta charset='utf-8'><title>STB Learning Dashboards</title>
+    <style>body{{font-family:Segoe UI,Arial;background:#0b1020;color:#eef3ff;margin:0;padding:30px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}}.card{{background:#121a2f;border:1px solid #2b3a62;border-radius:16px;padding:22px}}a{{color:#bfdbfe;font-size:20px}}.k{{font-size:34px;font-weight:800}}.muted{{color:#9fb0d0}}</style></head><body>
+    <h1>STB Autonomous Learning Dashboards</h1><p class='muted'>Two Superset-style views over the crawler's training brain, graph, known-knowns, known-unknowns, progress and history.</p>
+    <div class='grid'><div class='card'><a href='/dashboard/exec'>Executive dashboard</a><p>Leadership view: maturity, progress, confidence, risk, known channels, and remaining unknowns.</p><div class='k'>{ex.get('learning_maturity_pct',0)}%</div><p class='muted'>learning maturity</p></div>
+    <div class='card'><a href='/dashboard/eng'>Engineering dashboard</a><p>Debug view: coverage, OCR/focus quality, low-confidence transitions, action timing/rewards, and training backlog.</p><div class='k'>{ex.get('states',0)} / {ex.get('transitions',0)}</div><p class='muted'>states / transitions</p></div>
+    <div class='card'><a href='/api/dashboards/superset.zip'>Download Superset export</a><p>CSV datasets, SQL helper views, and dashboard manifests for Superset import.</p><div class='k'>{ex.get('known_unknowns',0)}</div><p class='muted'>known unknowns</p></div></div>
+    </body></html>"""
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/dashboard/exec")
+def dashboard_exec():
+    ds = _dash_data()
+    return Response(_dashboard_shell("STB Autonomous Learning — Executive", "exec", ds.executive()), mimetype="text/html")
+
+
+@app.route("/dashboard/eng")
+def dashboard_eng():
+    ds = _dash_data()
+    return Response(_dashboard_shell("STB Autonomous Learning — Engineering", "eng", ds.engineering()), mimetype="text/html")
+
+
+@app.route("/api/dashboards/summary")
+def api_dashboards_summary():
+    ds = _dash_data()
+    return jsonify(ok=True, generated_at=datetime.utcnow().isoformat() + "Z", headline=ds.executive().get("headline", {}))
+
+
+@app.route("/api/dashboards/exec")
+def api_dashboards_exec():
+    return jsonify(_dash_data().executive())
+
+
+@app.route("/api/dashboards/eng")
+def api_dashboards_eng():
+    return jsonify(_dash_data().engineering())
+
+
+@app.route("/api/dashboards/tables")
+def api_dashboards_tables():
+    tables = _dash_data().superset_tables()
+    return jsonify(ok=True, tables=tables)
+
+
+@app.route("/api/dashboards/superset.zip")
+def api_dashboards_superset_zip():
+    blob = _dash_data().export_zip_bytes()
+    return send_file(io.BytesIO(blob), mimetype="application/zip", as_attachment=True, download_name="stb_learning_superset_dashboards.zip")
 
 
 @app.route("/api/self-test")

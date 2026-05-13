@@ -31,11 +31,54 @@ import numpy as np
 
 from focus_detector import detect_focus
 
-
-# Phase A Enhancement: Pattern Recognition
-from persistence_tracker import PersistenceTracker, UnreachableState
-from sequence_learner import SequenceLearner, LearnedSequence
-from pattern_recognition import UIPattern, PatternRecognizer, PatternConfidence
+# v15: fork intelligence modules from aBotTesty. These are intentionally
+# non-critical; the crawler must still boot if one module is missing while
+# someone is experimenting with the fork.
+try:
+    from pattern_recognition import UIPattern, PatternRecognizer, PatternConfidence, AdaptiveThresholdModel
+except Exception:  # pragma: no cover - defensive fallback for partial forks
+    UIPattern = None  # type: ignore
+    PatternConfidence = None  # type: ignore
+    class PatternRecognizer:  # type: ignore
+        def classify_screen(self, fp, focus=None):
+            class _P:
+                pattern = type("_Enum", (), {"value": "unknown"})()
+                confidence = 0.0
+                reasons = ["pattern_recognition unavailable"]
+            return _P()
+        def get_pattern_stats(self):
+            return {"unavailable": True}
+    class AdaptiveThresholdModel:  # type: ignore
+        def get_threshold(self, pattern, state_id=None, default=0.86): return default
+        def update_state_stability(self, state_id, observations, variance): pass
+        def record_match(self, pattern, matched): pass
+        def get_stats(self): return {"unavailable": True}
+try:
+    from sequence_learner import SequenceLearner, LearnedSequence
+except Exception:  # pragma: no cover
+    LearnedSequence = None  # type: ignore
+    class SequenceLearner:  # type: ignore
+        def __init__(self, data_dir): pass
+        def record_action(self, *a, **k): pass
+        def mine_sequences(self, *a, **k): return []
+        def suggest_next_action(self, *a, **k): return None
+        def record_suggestion_outcome(self, *a, **k): pass
+        def get_stats(self): return {"unavailable": True}
+        def save(self): pass
+        def reset(self): pass
+try:
+    from persistence_tracker import PersistenceTracker, UnreachableState
+except Exception:  # pragma: no cover
+    UnreachableState = None  # type: ignore
+    class PersistenceTracker:  # type: ignore
+        def __init__(self, data_dir): pass
+        def mark_navigation_failed(self, *a, **k): pass
+        def mark_navigation_succeeded(self, *a, **k): pass
+        def record_retry_attempt(self, *a, **k): pass
+        def get_retry_candidates(self, *a, **k): return []
+        def get_stats(self): return {"unavailable": True}
+        def save(self): pass
+        def reset(self): pass
 
 log = logging.getLogger("merged.crawler")
 
@@ -61,7 +104,7 @@ class CrawlerConfig:
     start_sequence: List[str] = field(default_factory=list)
     settle_s: float = 1.15
     reset_settle_s: float = 1.8
-    between_key_s: float = 0.35
+    between_key_s: float = 0.08
     max_steps: int = 250
     max_states: int = 80
     max_depth: int = 7
@@ -93,6 +136,21 @@ class CrawlerConfig:
     timing_poll_s: float = 0.18
     stable_similarity_threshold: float = 0.985
     stable_observations_required: int = 2
+
+    # v14: separated execution speed from perception depth.
+    # "deep" = full OCR after most actions; "balanced" = full OCR at checkpoints;
+    # "tunnel" = fast visual verification for known paths, deep OCR only on surprises.
+    execution_mode: str = "balanced"
+    fast_known_path_enabled: bool = True
+    fast_known_action_min_attempts: int = 2
+    fast_known_action_min_reward: float = 4.0
+    fast_known_action_success_ratio: float = 0.60
+    deep_ocr_every_n_steps: int = 6
+    deep_ocr_on_select: bool = True
+    max_adaptive_observe_s: float = 1.8
+    timing_outlier_clip_s: float = 4.0
+    route_replay_gap_s: float = 0.075
+    route_replay_checkpoint_s: float = 0.45
 
     # Channel learning controls
     channel_learning_enabled: bool = False
@@ -233,7 +291,7 @@ class ScreenFingerprint:
     focus: Dict[str, Any] = field(default_factory=dict)
     width: int = 0
     height: int = 0
-    # Pattern recognition fields (Phase A Enhancement)
+    # v15: adaptive UI pattern intelligence from aBotTesty fork.
     ui_pattern: str = "unknown"
     pattern_confidence: float = 0.0
     pattern_reasons: List[str] = field(default_factory=list)
@@ -376,23 +434,23 @@ class FeatureExtractor:
             cv2.imwrite(str(screenshot_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
             screenshot = str(screenshot_path.relative_to(self.data_dir))
         text = self.ocr(frame)
-        focus = detect_focus(frame, self._pytesseract)
+        focus = detect_focus(frame, self._pytesseract if self.ocr_enabled else False)
         # Merge focus-local OCR into the global OCR context. This makes labels and
         # state matching much clearer when the full screen OCR is noisy.
         focus_text_parts = []
         if isinstance(focus, dict):
             # v9: merge spatial/semantic context, not just the raw focused crop.
             for key in (
-                "screen_title", "menu_title", "active_tab", "human_label",
-                "focused_item", "focused_value", "label_text", "focus_text",
-                "row_text", "context_text", "header_text", "action_bar_text",
+                "screen_title", "menu_title", "page_name", "block_title", "title_source", "active_tab", "human_label",
+                "focused_item", "focused_value", "channel_number", "channel_name", "popup_type",
+                "label_text", "focus_text", "row_text", "context_text", "header_text", "action_bar_text",
             ):
                 val = str(focus.get(key) or "").strip()
                 if val and val not in focus_text_parts:
                     focus_text_parts.append(val)
             ui = focus.get("ui_context") or {}
             if isinstance(ui, dict):
-                for key in ("context_summary", "screen_title", "focused_item", "focused_value", "row_text"):
+                for key in ("context_summary", "screen_title", "page_name", "block_title", "focused_item", "focused_value", "row_text"):
                     val = str(ui.get(key) or "").strip()
                     if val and val not in focus_text_parts:
                         focus_text_parts.append(val)
@@ -511,8 +569,8 @@ class NavigationGraph:
         self.nodes: Dict[str, StateNode] = {}
         self.edges: Dict[str, TransitionEdge] = {}
         self.root_state: Optional[str] = None
+        self.adaptive_thresholds = AdaptiveThresholdModel()
         self.load()
-        self.adaptive_thresholds = AdaptiveThresholdModel()  # Phase A Step A5
 
     @staticmethod
     def _now() -> str:
@@ -580,12 +638,17 @@ class NavigationGraph:
         return best_id, best_cmp
 
     def upsert_state(self, fp: ScreenFingerprint, threshold: float) -> Tuple[str, bool, Dict[str, float]]:
+        pattern = str(getattr(fp, "ui_pattern", "unknown") or "unknown")
+        threshold = float(self.adaptive_thresholds.get_threshold(pattern, default=threshold))
         best_id, cmp = self.find_best(fp)
         now = self._now()
+        matched = bool(best_id and cmp["score"] >= threshold)
+        self.adaptive_thresholds.record_match(pattern, matched)
         if best_id and cmp["score"] >= threshold:
             node = self.nodes[best_id]
             node.last_seen = now
             node.observation_count += 1
+            self.adaptive_thresholds.update_state_stability(best_id, node.observation_count, node.representative.variance)
             # Keep the original stable representative, but opportunistically enrich text.
             if fp.ocr_text and len(fp.ocr_text) > len(node.representative.ocr_text):
                 node.representative.ocr_text = fp.ocr_text
@@ -617,6 +680,7 @@ class NavigationGraph:
         )
         if self.root_state is None:
             self.root_state = sid
+        self.adaptive_thresholds.update_state_stability(sid, 1, fp.variance)
         return sid, True, cmp
 
     @staticmethod
@@ -871,8 +935,32 @@ class CrawlerBrain:
             self.action_timing[action] = ActionTiming(action=action)
         return self.action_timing[action]
 
-    def update_timing(self, action: str, response_s: float) -> None:
+    def update_timing(self, action: str, response_s: float, max_sample_s: Optional[float] = None) -> None:
+        # Perception/capture stalls can masquerade as remote latency. Clip those
+        # so one bad OCR/capture does not make future button presses painfully slow.
+        try:
+            response_s = float(response_s)
+            if max_sample_s is not None and max_sample_s > 0:
+                response_s = min(response_s, float(max_sample_s))
+        except Exception:
+            response_s = 0.0
         self.timing_for(action).update(response_s)
+
+    def sanitize_timing_outliers(self, max_avg_s: float = 4.0) -> int:
+        fixed = 0
+        for timing in self.action_timing.values():
+            if timing.avg_response_s > max_avg_s:
+                timing.avg_response_s = max_avg_s
+                fixed += 1
+            if timing.last_response_s > max_avg_s:
+                timing.last_response_s = max_avg_s
+            if timing.min_response_s > max_avg_s:
+                timing.min_response_s = max_avg_s
+            if timing.max_response_s > max_avg_s * 3:
+                timing.max_response_s = max_avg_s * 3
+        if fixed:
+            self.save()
+        return fixed
 
     def expected_settle_s(self, action: str, cfg: CrawlerConfig) -> float:
         timing = self.timing_for(action)
@@ -1166,12 +1254,16 @@ class AutonomousCrawler:
             ocr_enabled=self.config.ocr_enabled,
         )
         self.probe_extractor = FeatureExtractor(self.data_dir, save_screenshots=False, ocr_enabled=False)
+        # v14 fast extractor saves a screenshot but skips OCR. It is used for
+        # quick checkpoints so commands can stay fast while the crawler still
+        # remembers visual transitions.
+        self.fast_extractor = FeatureExtractor(self.data_dir, save_screenshots=True, ocr_enabled=False)
         self.graph = NavigationGraph(self.data_dir)
         self.brain = CrawlerBrain(self.data_dir)
-        self.pattern_recognizer = PatternRecognizer()  # Phase A
-        self.sequence_learner = SequenceLearner(self.data_dir)  # Phase B
-        self.persistence_tracker = PersistenceTracker(self.data_dir)  # Phase C
-        self.recent_actions: Deque[str] = deque(maxlen=10)  # Phase B
+        self.pattern_recognizer = PatternRecognizer()
+        self.sequence_learner = SequenceLearner(self.data_dir)
+        self.persistence_tracker = PersistenceTracker(self.data_dir)
+        self.recent_actions: Deque[str] = deque(maxlen=12)
         self.events: Deque[CrawlEvent] = deque(maxlen=300)
         self._lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
@@ -1215,6 +1307,7 @@ class AutonomousCrawler:
                 "root_state": self.graph.root_state,
                 "config": asdict(self.config),
                 "ocr_available": bool(self.extractor._pytesseract),
+                "runtime_policy": self.execution_policy_summary(),
                 "graph_file": str(self.graph.graph_path),
                 "brain_file": str(self.brain.path),
                 "learning": {
@@ -1228,139 +1321,13 @@ class AutonomousCrawler:
                     "state_actions": {k: asdict(v) for k, v in self.brain.state_actions.items()},
                     "coverage": self.exploration_coverage(),
                     "channels": self.brain.channel_summary(),
+                    "patterns": self.pattern_recognizer.get_pattern_stats(),
+                    "adaptive_thresholds": self.graph.adaptive_thresholds.get_stats(),
+                    "sequences": self.sequence_learner.get_stats(),
+                    "persistence": self.persistence_tracker.get_stats(),
                 },
                 "recent_events": [asdict(e) for e in list(self.events)[-40:]],
             }
-
-
-    # ============================================================================
-    # PHASE A STEP A4: Adaptive Action Selection
-    # Pattern-specific action ordering for efficient exploration
-    # ============================================================================
-    
-    def _prefer_directional(self, actions: List[str]) -> List[str]:
-        """
-        Prefer directional navigation for grid-based UIs.
-        
-        Args:
-            actions: Available actions
-            
-        Returns:
-            Reordered actions prioritizing directional buttons
-        """
-        directional = ['up', 'down', 'left', 'right']
-        dir_actions = [a for a in actions if a in directional]
-        other_actions = [a for a in actions if a not in directional]
-        return dir_actions + other_actions
-    
-    def _prefer_select_and_back(self, actions: List[str]) -> List[str]:
-        """
-        Prefer select and back for form/menu UIs.
-        
-        Args:
-            actions: Available actions
-            
-        Returns:
-            Reordered actions prioritizing select/back/enter
-        """
-        priority = ['select', 'enter', 'ok', 'back']
-        directional = ['up', 'down', 'left', 'right']
-        
-        priority_actions = [a for a in actions if a in priority]
-        dir_actions = [a for a in actions if a in directional]
-        other_actions = [a for a in actions if a not in priority and a not in directional]
-        
-        # For forms/menus: select/back first, then directional (to navigate), then others
-        return priority_actions + dir_actions + other_actions
-    
-    def _prefer_meta_buttons(self, actions: List[str]) -> List[str]:
-        """
-        Prefer meta buttons (guide, info, menu) for video players.
-        
-        Args:
-            actions: Available actions
-            
-        Returns:
-            Reordered actions prioritizing overlay/meta buttons
-        """
-        meta = ['guide', 'info', 'menu', 'options', 'back', 'home']
-        playback = ['play', 'pause', 'stop', 'rewind', 'forward']
-        directional = ['up', 'down', 'left', 'right']
-        
-        meta_actions = [a for a in actions if a in meta]
-        playback_actions = [a for a in actions if a in playback]
-        dir_actions = [a for a in actions if a in directional]
-        other_actions = [a for a in actions if a not in meta + playback + directional]
-        
-        # For video: meta buttons to access overlays, then playback, avoid directional spam
-        return meta_actions + playback_actions + other_actions + dir_actions
-    
-    def _apply_pattern_preference(self, actions: List[str], pattern: str) -> List[str]:
-        """
-        Apply pattern-specific action ordering.
-        
-        Args:
-            actions: Available actions
-            pattern: Detected UI pattern (from UIPattern enum)
-            
-        Returns:
-            Reordered actions based on pattern
-        """
-        if not actions:
-            return actions
-        
-        if pattern == "grid_menu":
-            return self._prefer_directional(actions)
-        elif pattern in ["linear_menu", "form"]:
-            return self._prefer_select_and_back(actions)
-        elif pattern == "video_player":
-            return self._prefer_meta_buttons(actions)
-        elif pattern == "info_card":
-            # Info cards: back to exit, avoid random navigation
-            return self._prefer_select_and_back(actions)
-        else:
-            # Unknown pattern: use default ordering
-            return actions
-
-
-
-    def choose_action_with_sequences(self, state_id: str, available_actions: List[str]) -> str:
-        """
-        Choose next action considering learned sequences.
-        Phase B enhancement.
-        
-        Args:
-            state_id: Current state
-            available_actions: Available actions
-            
-        Returns:
-            Chosen action
-        """
-        # Phase B: Check for sequence completion opportunity
-        if hasattr(self, 'sequence_learner') and hasattr(self, 'recent_actions'):
-            suggestion = self.sequence_learner.suggest_next_action(list(self.recent_actions))
-            
-            if suggestion:
-                suggested_action, confidence = suggestion
-                
-                # Use suggestion if action is available and confidence is high enough
-                if suggested_action in available_actions and confidence > 0.25:
-                    self.event("info", "Completing learned sequence", 
-                              action=suggested_action, confidence=confidence,
-                              recent=list(self.recent_actions)[-3:])
-                    return suggested_action
-        
-        # Fall back to pattern-based selection
-        if hasattr(self, 'pattern_recognizer') and state_id in self.graph.nodes:
-            state_node = self.graph.nodes[state_id]
-            state_fp = state_node.representative
-            pattern = getattr(state_fp, 'ui_pattern', 'unknown')
-            
-            if pattern and pattern != 'unknown':
-                return self._apply_pattern_preference(available_actions, pattern)[0] if available_actions else "back"
-        
-        # Random fallback
-        return available_actions[0] if available_actions else "back"
 
     def start(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         with self._lock:
@@ -1374,6 +1341,10 @@ class AutonomousCrawler:
                 ocr_enabled=self.config.ocr_enabled,
             )
             self.probe_extractor = FeatureExtractor(self.data_dir, save_screenshots=False, ocr_enabled=False)
+            self.fast_extractor = FeatureExtractor(self.data_dir, save_screenshots=True, ocr_enabled=False)
+            fixed = self.brain.sanitize_timing_outliers(float(self.config.timing_outlier_clip_s))
+            if fixed:
+                log.info("crawler timing outliers clipped: %s", fixed)
             self._stop.clear()
             self._running = True
             self._run_id = f"crawl_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1401,8 +1372,10 @@ class AutonomousCrawler:
             "min_active_required",
             "continuous_exploration_enabled",
             "reseed_when_idle",
+            "fast_known_path_enabled",
+            "deep_ocr_on_select",
         }
-        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles"}
+        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps"}
         float_fields = {
             "settle_s", "reset_settle_s", "between_key_s", "state_similarity_threshold",
             "changed_similarity_threshold", "reward_new_state", "reward_new_menu", "reward_new_setting",
@@ -1411,7 +1384,8 @@ class AutonomousCrawler:
             "stable_similarity_threshold", "channel_digit_gap_s", "channel_tune_settle_s",
             "continuous_idle_s", "reward_new_edge", "reward_leads_to_unexplored",
             "penalty_repeat_transition", "penalty_same_state_loop", "repeat_reward_floor_for_retry",
-            "curiosity_randomness",
+            "curiosity_randomness", "fast_known_action_min_reward", "fast_known_action_success_ratio",
+            "max_adaptive_observe_s", "timing_outlier_clip_s", "route_replay_gap_s", "route_replay_checkpoint_s",
         }
         for key, value in overrides.items():
             if key not in allowed:
@@ -1459,6 +1433,9 @@ class AutonomousCrawler:
             raise RuntimeError("stop crawler before resetting graph")
         self.graph.reset()
         self.brain.reset()
+        self.sequence_learner.reset()
+        self.persistence_tracker.reset()
+        self.recent_actions.clear()
         self.events.clear()
         self.event("info", "navigation graph and learning brain reset")
         return self.status()
@@ -1495,6 +1472,11 @@ class AutonomousCrawler:
                 self._finished_at = self._now()
             self.graph.save()
             self.brain.save()
+            try:
+                self.sequence_learner.save()
+                self.persistence_tracker.save()
+            except Exception:
+                log.debug("unable to save auxiliary learners", exc_info=True)
             self.event("info", "crawl finished", steps=self._steps, states=len(self.graph.nodes), edges=len(self.graph.edges))
 
     def restore_start_context(self) -> None:
@@ -1528,6 +1510,38 @@ class AutonomousCrawler:
             if attempts < max(1, cfg.max_action_attempts_per_state) or avg_reward >= cfg.repeat_reward_floor_for_retry:
                 remaining.append(action)
         return remaining
+
+    def _pattern_for_state(self, state_id: str) -> str:
+        node = self.graph.nodes.get(state_id)
+        if not node:
+            return "unknown"
+        return str(getattr(node.representative, "ui_pattern", "unknown") or "unknown")
+
+    def apply_pattern_action_order(self, state_id: str, actions: List[str]) -> List[str]:
+        """v15: reorder actions according to learned UI pattern + sequence hints."""
+        if not actions:
+            return actions
+        pattern = self._pattern_for_state(state_id)
+        priority: List[str]
+        if pattern == "grid_menu":
+            priority = ["up", "down", "left", "right", "select", "back", "info", "guide", "home"]
+        elif pattern in {"linear_menu", "form", "pin_prompt"}:
+            priority = ["down", "up", "select", "right", "left", "back", "info", "home"]
+        elif pattern == "video_player":
+            priority = ["guide", "info", "options", "back", "home", "live", "recall", "up", "down", "left", "right"]
+        elif pattern == "info_card":
+            priority = ["back", "info", "select", "down", "up", "left", "right", "home"]
+        else:
+            priority = []
+        rank = {a: i for i, a in enumerate(priority)}
+        ordered = sorted(actions, key=lambda a: (rank.get(str(a).lower(), 99), actions.index(a)))
+        suggestion = self.sequence_learner.suggest_next_action(list(self.recent_actions))
+        if suggestion:
+            suggested, conf = suggestion
+            if suggested in ordered and conf >= 0.20:
+                ordered = [suggested] + [a for a in ordered if a != suggested]
+                self.event("info", "sequence learner suggested next action", action=suggested, confidence=round(float(conf), 3), recent=list(self.recent_actions))
+        return ordered
 
     def build_frontier(self) -> Deque[Tuple[str, int, float]]:
         depths = self.graph.depths_from_root()
@@ -1646,10 +1660,20 @@ class AutonomousCrawler:
                 if not remaining_actions:
                     continue
                 if not self.navigate_to_state(state_id):
+                    node = self.graph.nodes.get(state_id)
+                    self.persistence_tracker.mark_navigation_failed(
+                        state_id,
+                        route=[],
+                        reason="unable_to_restore_frontier_state",
+                        context={"label": node.label if node else state_id, "pattern": self._pattern_for_state(state_id), "depth": depth},
+                    )
                     self.event("warning", "unable to restore target state; skipping", state=state_id)
                     continue
+                else:
+                    self.persistence_tracker.mark_navigation_succeeded(state_id)
 
                 actions = self.brain.order_actions(remaining_actions) if cfg.self_explore_enabled else list(remaining_actions)
+                actions = self.apply_pattern_action_order(state_id, actions)
                 # Human-like curiosity: mostly exploit learned high-reward paths, but occasionally
                 # try a lower-ranked under-sampled action so it can escape local menu loops.
                 if cfg.self_explore_enabled and len(actions) > 2 and random.random() < max(0.0, min(0.5, cfg.curiosity_randomness)):
@@ -1705,6 +1729,40 @@ class AutonomousCrawler:
             # Return to the configured start/root context before the next channel.
             self.restore_start_context()
 
+    def execution_policy_summary(self) -> Dict[str, Any]:
+        cfg = self.config
+        return {
+            "execution_mode": cfg.execution_mode,
+            "fast_known_path_enabled": cfg.fast_known_path_enabled,
+            "fast_known_action_min_attempts": cfg.fast_known_action_min_attempts,
+            "fast_known_action_min_reward": cfg.fast_known_action_min_reward,
+            "deep_ocr_every_n_steps": cfg.deep_ocr_every_n_steps,
+            "max_adaptive_observe_s": cfg.max_adaptive_observe_s,
+            "timing_outlier_clip_s": cfg.timing_outlier_clip_s,
+            "route_replay_gap_s": cfg.route_replay_gap_s,
+        }
+
+    def state_action_is_confident(self, state_id: str, action: str) -> bool:
+        cfg = self.config
+        stat = self.brain.state_actions.get(f"{state_id}|{action}")
+        if not stat or stat.attempts < max(1, cfg.fast_known_action_min_attempts):
+            return False
+        success_ratio = stat.successes / max(1, stat.attempts)
+        return success_ratio >= cfg.fast_known_action_success_ratio and stat.avg_reward >= cfg.fast_known_action_min_reward
+
+    def should_use_fast_perception(self, state_id: str, action: str) -> bool:
+        cfg = self.config
+        mode = str(cfg.execution_mode or "balanced").lower()
+        if mode == "deep":
+            return False
+        if mode == "tunnel":
+            return str(action).lower() != "select" or not cfg.deep_ocr_on_select
+        if self._steps > 0 and cfg.deep_ocr_every_n_steps > 0 and self._steps % cfg.deep_ocr_every_n_steps == 0:
+            return False
+        if str(action).lower() == "select" and cfg.deep_ocr_on_select:
+            return False
+        return self.state_action_is_confident(state_id, action)
+
     def wait_for_good_frame(self, timeout_s: float = 8.0) -> Tuple[np.ndarray, Dict[str, Any]]:
         deadline = time.time() + timeout_s
         last_status: Dict[str, Any] = {}
@@ -1718,24 +1776,22 @@ class AutonomousCrawler:
             time.sleep(0.15)
         raise RuntimeError(f"no active video frame available; last_status={last_status}")
 
-    def capture_fingerprint(self, hint_prefix: str = "screen") -> ScreenFingerprint:
+    def capture_fingerprint(self, hint_prefix: str = "screen", perception: str = "full") -> ScreenFingerprint:
         frame, status = self.wait_for_good_frame()
         hint = f"{hint_prefix}_{uuid.uuid4().hex[:10]}"
-        fp = self.extractor.extract(frame, hint_id=hint)
-        
-        # Phase A: Add pattern detection
-        if hasattr(self, 'pattern_recognizer'):
-            pattern_result = self.pattern_recognizer.classify_screen(fp, fp.focus)
-            fp.ui_pattern = pattern_result.pattern.value
-            fp.pattern_confidence = pattern_result.confidence
-            fp.pattern_reasons = pattern_result.reasons
-            
-            # Learn this pattern for future reference
-            self.pattern_recognizer.learn_pattern(fp.state_id, pattern_result.pattern)
-
+        extractor = self.fast_extractor if str(perception).lower() in {"fast", "visual", "noocr"} else self.extractor
+        fp = extractor.extract(frame, hint_id=hint)
         # Preserve capture status in the OCR text if there is no OCR, useful for labels/debugging.
         if not fp.ocr_text:
             fp.ocr_text = ""
+        try:
+            pc = self.pattern_recognizer.classify_screen(fp, fp.focus)
+            pattern = getattr(pc, "pattern", None)
+            fp.ui_pattern = getattr(pattern, "value", str(pattern or "unknown"))
+            fp.pattern_confidence = float(getattr(pc, "confidence", 0.0) or 0.0)
+            fp.pattern_reasons = list(getattr(pc, "reasons", []) or [])[:10]
+        except Exception:
+            log.debug("pattern classification failed", exc_info=True)
         return fp
 
     def safe_send(self, key: str) -> Dict[str, Any]:
@@ -1743,22 +1799,14 @@ class AutonomousCrawler:
         self.event("debug", "send key", key=key)
         result = self.send_key(key)
         time.sleep(self.config.between_key_s)
-
-        # Phase B: Record action for sequence learning
-        if hasattr(self, 'sequence_learner'):
-            self.sequence_learner.record_action(
-                from_state=state_id,
-                action=action,
-                to_state=result.get("to_state", state_id),
-                reward=result.get("reward", 0.0),
-                time_s=result.get("settle_time", 0.0)
-            )
-        
-        # Phase B: Track recent actions
-        if hasattr(self, 'recent_actions'):
-            self.recent_actions.append(action)
-
         return result
+
+    def fast_send(self, key: str) -> Dict[str, Any]:
+        """Send without the crawler's extra inter-key sleep. Used for replaying
+        already-learned paths and timed sequences."""
+        key = str(key).strip()
+        self.event("debug", "fast send key", key=key)
+        return self.send_key(key)
 
     def quick_fingerprint(self, hint_prefix: str = "probe") -> ScreenFingerprint:
         frame, _ = self.wait_for_good_frame(timeout_s=max(1.0, self.config.timing_poll_s * 4))
@@ -1769,17 +1817,20 @@ class AutonomousCrawler:
         action: str,
         before_fp: ScreenFingerprint,
         force_settle_s: Optional[float] = None,
+        perception: str = "full",
     ) -> Tuple[ScreenFingerprint, float, Dict[str, Any]]:
         cfg = self.config
         if force_settle_s is not None:
             time.sleep(max(cfg.min_settle_s, float(force_settle_s)))
-            return self.capture_fingerprint(hint_prefix="after"), float(force_settle_s), {"mode": "forced"}
+            return self.capture_fingerprint(hint_prefix="after", perception=perception), float(force_settle_s), {"mode": "forced", "perception": perception}
         if not cfg.adaptive_timing_enabled:
-            time.sleep(cfg.settle_s)
-            return self.capture_fingerprint(hint_prefix="after"), cfg.settle_s, {"mode": "fixed"}
+            time.sleep(min(cfg.settle_s, cfg.max_adaptive_observe_s))
+            return self.capture_fingerprint(hint_prefix="after", perception=perception), min(cfg.settle_s, cfg.max_adaptive_observe_s), {"mode": "fixed", "perception": perception}
 
         expected = self.brain.expected_settle_s(action, cfg)
-        deadline = time.time() + max(cfg.max_settle_s, expected)
+        # Hard cap observation time. This protects button pacing from capture/OCR stalls.
+        hard_cap = max(cfg.min_settle_s, min(float(cfg.max_adaptive_observe_s), float(cfg.max_settle_s)))
+        deadline = time.time() + max(cfg.min_settle_s, min(hard_cap, expected))
         earliest = time.time() + max(cfg.min_settle_s, min(expected, cfg.max_settle_s))
         start = time.time()
         first_change_s: Optional[float] = None
@@ -1814,10 +1865,14 @@ class AutonomousCrawler:
                 break
 
         response_s = first_change_s if first_change_s is not None else max(expected, time.time() - start)
-        self.brain.update_timing(action, response_s)
-        # Capture a full, saved/OCR fingerprint once the screen is believed stable.
-        after_fp = self.capture_fingerprint(hint_prefix="after") if last is not None else self.capture_fingerprint(hint_prefix="after")
-        debug["response_s"] = round(response_s, 3)
+        clipped_response_s = min(float(response_s), float(cfg.timing_outlier_clip_s))
+        self.brain.update_timing(action, clipped_response_s, max_sample_s=cfg.timing_outlier_clip_s)
+        # Capture a saved fingerprint once the screen is believed stable. In fast
+        # mode this skips OCR; callers can deep-recapture only if the transition is new/surprising.
+        after_fp = self.capture_fingerprint(hint_prefix="after", perception=perception) if last is not None else self.capture_fingerprint(hint_prefix="after", perception=perception)
+        debug["response_s"] = round(clipped_response_s, 3)
+        debug["raw_response_s"] = round(float(response_s), 3)
+        debug["perception"] = perception
         debug["stable_count"] = stable_count
         return after_fp, response_s, debug
 
@@ -1839,25 +1894,44 @@ class AutonomousCrawler:
                 return True
             path = self.graph.shortest_path(sid, target_state) or self.graph.shortest_path(self.graph.root_state, target_state)
             if not path:
+                if target_state != self.graph.root_state:
+                    node = self.graph.nodes.get(target_state)
+                    self.persistence_tracker.mark_navigation_failed(
+                        target_state,
+                        route=[],
+                        reason="no_learned_route_to_state",
+                        context={"label": node.label if node else target_state, "pattern": self._pattern_for_state(target_state)},
+                    )
                 return target_state == self.graph.root_state
-            self.event("info", "replaying path", target=target_state, path=path, attempt=attempt + 1)
-            for key in path:
-                self.safe_send(key)
-                time.sleep(self.brain.expected_settle_s(key, cfg))
+            self.event("info", "replaying path", target=target_state, path=path, attempt=attempt + 1, fast=cfg.fast_known_path_enabled)
+            if cfg.fast_known_path_enabled and len(path) > 1:
+                # Known path replay is command execution, not exploration. Press quickly,
+                # then verify once at the checkpoint so screen timeouts do not eat us.
+                for key in path:
+                    self.fast_send(key)
+                    time.sleep(max(0.02, float(cfg.route_replay_gap_s)))
+                time.sleep(max(0.05, float(cfg.route_replay_checkpoint_s)))
+            else:
+                for key in path:
+                    self.safe_send(key)
+                    time.sleep(min(self.brain.expected_settle_s(key, cfg), cfg.max_adaptive_observe_s))
             sid, _, cmp = self.current_state_id()
             if sid == target_state or cmp.get("score", 0.0) >= cfg.state_similarity_threshold:
                 return True
+        self.persistence_tracker.mark_navigation_failed(target_state, route=[], reason="replay_verification_failed", context={"pattern": self._pattern_for_state(target_state)})
         return False
 
     def try_action(self, from_state: str, action: str, force_settle_s: Optional[float] = None) -> Dict[str, Any]:
         cfg = self.config
         self._steps += 1
-
         action_norm = str(action).strip()
         action_lower = action_norm.lower()
         self.event("info", "try action", from_state=from_state, action=action_norm, step=self._steps)
 
-        before_fp = self.capture_fingerprint(hint_prefix="before")
+        # For confident known state/actions, use a visual-only pre-check so command
+        # pacing remains quick. Risky SELECT still forces deep OCR for safety.
+        fast_pre = self.should_use_fast_perception(from_state, action_norm)
+        before_fp = self.capture_fingerprint(hint_prefix="before", perception="fast" if fast_pre else "full")
         before_id, _, _ = self.graph.upsert_state(before_fp, cfg.state_similarity_threshold)
         if before_id != from_state:
             # The live UI drifted. Learn from what we see rather than lying to the graph.
@@ -1911,8 +1985,16 @@ class AutonomousCrawler:
                 "edge": asdict(edge),
             }
 
-        after_fp, response_s, timing_debug = self.wait_after_action(action_norm, before_fp, force_settle_s=force_settle_s)
+        fast_after = self.should_use_fast_perception(from_state, action_norm) and force_settle_s is None
+        after_fp, response_s, timing_debug = self.wait_after_action(action_norm, before_fp, force_settle_s=force_settle_s, perception="fast" if fast_after else "full")
         after_id, created, cmp_to_known = self.graph.upsert_state(after_fp, cfg.state_similarity_threshold)
+        # If the fast visual checkpoint found something new or uncertain, immediately
+        # re-read it deeply so the graph gains OCR/context, but keep known-path steps fast.
+        if fast_after and (created or cmp_to_known.get("score", 0.0) < cfg.state_similarity_threshold or self._steps % max(1, cfg.deep_ocr_every_n_steps) == 0):
+            deep_fp = self.capture_fingerprint(hint_prefix="after_deep", perception="full")
+            deep_id, deep_created, deep_cmp = self.graph.upsert_state(deep_fp, cfg.state_similarity_threshold)
+            after_fp, after_id, created, cmp_to_known = deep_fp, deep_id, bool(created or deep_created), deep_cmp
+            timing_debug["deep_checkpoint"] = True
         cmp_before_after = SimilarityModel.compare(before_fp, after_fp)
         changed = cmp_before_after["score"] < cfg.changed_similarity_threshold or after_id != from_state
         success = True
@@ -2013,6 +2095,15 @@ class AutonomousCrawler:
             noop=not changed,
             discovery=bool(created or not edge_existed or reward_details.get("new_tokens") or reward_details.get("new_menu_reward") or reward_details.get("new_setting_reward") or reward_details.get("new_feature_reward")),
         )
+        try:
+            self.recent_actions.append(action_norm)
+            self.sequence_learner.record_action(from_state, action_norm, after_id, reward=reward, time_s=round(time.time() - send_started, 3))
+            if self._steps % 8 == 0:
+                learned_sequences = self.sequence_learner.mine_sequences()
+                if learned_sequences:
+                    self.event("info", "learned useful action sequences", count=len(learned_sequences), top=self.sequence_learner.get_stats().get("top_sequences", [])[:3])
+        except Exception:
+            log.debug("sequence learner update failed", exc_info=True)
 
         self.event(
             "info",
@@ -2199,6 +2290,67 @@ class AutonomousCrawler:
             "video": status,
         }
 
+
+    def review_context_quality(self, max_nodes: int = 0, auto_enrich: bool = False) -> Dict[str, Any]:
+        """Find questionable learned screenshots and optionally re-OCR them.
+
+        This is the operator-facing QA pass: it looks for missing focus, weak OCR,
+        missing title, low focus confidence, and popup/PIN screens. With
+        auto_enrich=True it reprocesses the saved screenshots using the latest
+        focus/context recovery logic and updates the graph.
+        """
+        if auto_enrich:
+            enrich = self.enrich_existing_context(max_nodes=max_nodes)
+        else:
+            enrich = None
+        findings: List[Dict[str, Any]] = []
+        counts: Dict[str, int] = {}
+        attempted = 0
+        limit = int(max_nodes or 0)
+        for sid, node in list(self.graph.nodes.items()):
+            if limit and attempted >= limit:
+                break
+            attempted += 1
+            fp = node.representative
+            focus = fp.focus or {}
+            flags = list(focus.get("quality_flags") or [])
+            if not focus.get("found"):
+                flags.append("no_focus_detected")
+            if focus.get("confidence", 1.0) < 0.25:
+                flags.append("low_focus_confidence")
+            if not (focus.get("screen_title") or focus.get("page_name") or focus.get("block_title")):
+                flags.append("missing_screen_title")
+            if focus.get("popup_type"):
+                flags.append(f"popup:{focus.get('popup_type')}")
+            flags = sorted(set(flags))
+            for f in flags:
+                counts[f] = counts.get(f, 0) + 1
+            if flags and len(findings) < 80:
+                findings.append({
+                    "state_id": sid,
+                    "label": node.label,
+                    "screenshot": fp.screenshot,
+                    "flags": flags,
+                    "title": focus.get("screen_title") or focus.get("page_name") or focus.get("block_title") or "",
+                    "page_name": focus.get("page_name") or "",
+                    "block_title": focus.get("block_title") or "",
+                    "focused_item": focus.get("focused_item") or "",
+                    "human_label": focus.get("human_label") or "",
+                    "popup_type": focus.get("popup_type") or "",
+                    "pin_required": bool(focus.get("pin_required")),
+                    "context_confidence": focus.get("context_confidence") or 0,
+                    "image_url": f"/api/crawl/state/{sid}/image",
+                })
+        return {
+            "ok": True,
+            "attempted": attempted,
+            "auto_enrich": bool(auto_enrich),
+            "enrich": enrich,
+            "issue_counts": dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "questionable_count": sum(1 for _ in findings),
+            "findings": findings,
+        }
+
     def enrich_existing_context(self, max_nodes: int = 0) -> Dict[str, Any]:
         """Re-run v9 focus/title/context perception over saved screenshots.
 
@@ -2234,13 +2386,13 @@ class AutonomousCrawler:
             old_label = node.label
             fp.focus = focus
             parts = [fp.ocr_text or ""]
-            for key in ("screen_title", "human_label", "focused_item", "focused_value", "row_text", "context_text", "header_text", "action_bar_text"):
+            for key in ("screen_title", "page_name", "block_title", "human_label", "focused_item", "focused_value", "channel_number", "channel_name", "popup_type", "row_text", "context_text", "header_text", "action_bar_text"):
                 val = str(focus.get(key) or "").strip()
                 if val:
                     parts.append(val)
             ui = focus.get("ui_context") or {}
             if isinstance(ui, dict):
-                for key in ("context_summary", "screen_title", "focused_item", "focused_value", "row_text"):
+                for key in ("context_summary", "screen_title", "page_name", "block_title", "focused_item", "focused_value", "row_text"):
                     val = str(ui.get(key) or "").strip()
                     if val:
                         parts.append(val)
@@ -2495,6 +2647,10 @@ class AutonomousCrawler:
             "action_confidence": action_conf,
             "timing": {k: asdict(v) for k, v in self.brain.action_timing.items()},
             "channels": self.brain.channel_summary(),
+            "patterns": self.pattern_recognizer.get_pattern_stats(),
+            "adaptive_thresholds": self.graph.adaptive_thresholds.get_stats(),
+            "sequences": self.sequence_learner.get_stats(),
+            "persistence": self.persistence_tracker.get_stats(),
             "recent_events": [asdict(e) for e in list(self.events)[-30:]],
         }
 
