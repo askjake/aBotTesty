@@ -1,1 +1,13 @@
-v10-dish-page-block-title-context
+v16-dashboard-superset
+
+Adds Superset-style executive and engineering dashboards for crawler learning/progress/history:
+- /dashboards
+- /dashboard/exec
+- /dashboard/eng
+- /api/dashboards/summary
+- /api/dashboards/exec
+- /api/dashboards/eng
+- /api/dashboards/tables
+- /api/dashboards/superset.zip
+
+Keeps v15 fork-merge features, v14 timed execution, teacher mode, focus/context perception, parental lab, and intelligence console.
