@@ -28,7 +28,7 @@
   ],
   "crawler_max_steps": 0,
   "crawler_max_states": 0,
-  "crawler_max_depth": 7,
+  "crawler_max_depth": 15,
   "crawler_state_similarity_threshold": 0.86,
   "crawler_changed_similarity_threshold": 0.94,
   "crawler_ocr_enabled": true,
@@ -90,5 +90,7 @@
     [
       "input"
     ]
-  ]
+  ],
+  "crawler_max_action_attempts_per_state": 10,
+  "crawler_repeat_reward_floor_for_retry": 1.0
 }
