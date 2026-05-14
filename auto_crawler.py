@@ -1595,6 +1595,16 @@ class AutonomousCrawler:
             sid, created, cmp = self.current_state_id()
             self.graph.root_state = self.graph.root_state or sid
             self.graph.save()
+            # PATCH v16-fix: Force the reseeded state back into the frontier.
+            # Without this, states already saturated at max_action_attempts_per_state
+            # are permanently excluded from build_frontier() even after a reseed,
+            # causing continuous reseeding with zero actual exploration.
+            if sid and sid in self.graph.nodes:
+                for _reseed_action in self.config.enabled_keys:
+                    _key = self.brain.state_action_key(sid, _reseed_action)
+                    _stat = self.brain.state_actions.get(_key)
+                    if _stat and _stat.attempts >= self.config.max_action_attempts_per_state:
+                        _stat.attempts = max(0, _stat.attempts - 1)
             self.event("info", "reseed classified screen", state=sid, created=created, similarity=cmp)
             return sid
         except Exception as exc:
