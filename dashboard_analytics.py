@@ -211,9 +211,10 @@ class DashboardDataset:
             rep = node.get("representative", {})
             focus = get_focus(rep)
             ui = ui_context(focus)
+            human = focus.get("human_cues") if isinstance(focus.get("human_cues"), dict) else {}
             quality, reasons = classify_quality(node)
             text = clean_text(rep.get("ocr_text"), 500)
-            risk = bool(RISK_WORDS.search(text) or RISK_WORDS.search(json.dumps(focus)[:1500]))
+            risk = bool(RISK_WORDS.search(text) or RISK_WORDS.search(json.dumps(focus)[:1500]) or human.get("risk_flags"))
             rows.append({
                 "state_id": sid,
                 "label": node_label(node),
@@ -232,6 +233,11 @@ class DashboardDataset:
                 "quality": quality,
                 "quality_reasons": ", ".join(reasons),
                 "risk_flag": risk,
+                "human_screen_kind": human.get("screen_kind") or "",
+                "human_confidence": round(safe_float(human.get("confidence"), 0), 4) if human else 0.0,
+                "human_feature_tags": ", ".join(human.get("feature_tags", [])[:12]) if human else "",
+                "human_test_goals": ", ".join(g.get("goal", "") for g in human.get("test_goals", [])[:6]) if human else "",
+                "human_annoyance_flags": ", ".join(human.get("annoyance_flags", [])[:12]) if human else "",
                 "ui_pattern": rep.get("ui_pattern") or "unknown",
                 "pattern_confidence": round(safe_float(rep.get("pattern_confidence"), 0), 4),
                 "brightness": safe_float(rep.get("brightness"), 0),
@@ -281,10 +287,19 @@ class DashboardDataset:
                 "total_reward": safe_float(r.get("total_reward"), 0),
                 "avg_reward": round(safe_float(r.get("avg_reward"), 0), 4),
                 "timing_attempts": int(t.get("attempts", 0) or 0),
+                # Legacy response fields now represent first visible action start.
                 "avg_response_s": round(safe_float(t.get("avg_response_s"), 0), 4),
                 "last_response_s": round(safe_float(t.get("last_response_s"), 0), 4),
                 "min_response_s": round(safe_float(t.get("min_response_s"), 0), 4),
                 "max_response_s": round(safe_float(t.get("max_response_s"), 0), 4),
+                "avg_start_s": round(safe_float(t.get("avg_start_s", t.get("avg_response_s")), 0), 4),
+                "last_start_s": round(safe_float(t.get("last_start_s", t.get("last_response_s")), 0), 4),
+                "avg_complete_s": round(safe_float(t.get("avg_complete_s"), 0), 4),
+                "last_complete_s": round(safe_float(t.get("last_complete_s"), 0), 4),
+                "max_complete_s": round(safe_float(t.get("max_complete_s"), 0), 4),
+                "avg_stable_s": round(safe_float(t.get("avg_stable_s"), 0), 4),
+                "remarkable_count": int(t.get("remarkable_count", 0) or 0),
+                "last_flags": ",".join(t.get("last_flags", []) if isinstance(t.get("last_flags", []), list) else []),
             })
         return rows
 
@@ -434,6 +449,7 @@ class DashboardDataset:
         coverage = self.coverage_rows()
         qualities = Counter(r["quality"] for r in nodes)
         patterns = Counter(r["ui_pattern"] for r in nodes)
+        human_kinds = Counter(r.get("human_screen_kind") or "unknown" for r in nodes)
         per_action_coverage = defaultdict(lambda: {"tried": 0, "total": 0})
         for r in coverage:
             per_action_coverage[r["action"]]["total"] += 1
@@ -447,7 +463,8 @@ class DashboardDataset:
             "pattern_breakdown": [{"pattern": k, "count": v} for k, v in patterns.items()],
             "per_action_coverage": [{"action": a, "tried": v["tried"], "total": v["total"], "coverage_pct": pct(v["tried"], v["total"])} for a, v in sorted(per_action_coverage.items())],
             "actions": actions,
-            "slow_actions": sorted(actions, key=lambda r: r["avg_response_s"], reverse=True)[:20],
+            "slow_actions": sorted(actions, key=lambda r: r.get("avg_complete_s") or r.get("avg_response_s") or 0, reverse=True)[:20],
+            "remarkable_timing_actions": [a for a in sorted(actions, key=lambda r: r.get("remarkable_count", 0), reverse=True) if a.get("remarkable_count", 0) > 0][:40],
             "edges_low_confidence": [e for e in sorted(edges, key=lambda r: r["confidence"]) if e["confidence"] < 0.45][:80],
             "state_quality": sorted(nodes, key=lambda r: ({"bad": 0, "questionable": 1, "good": 2}.get(r["quality"], 3), -r["observation_count"]))[:200],
             "known_unknowns": self.known_unknown_rows()[:200],
@@ -507,7 +524,8 @@ class DashboardDataset:
                     "recommended_charts": [
                         "Heatmap: state/action coverage",
                         "Table: low-confidence transitions",
-                        "Bar: response timing by action",
+                        "Bar: action start vs completion timing by action",
+                        "Table: remarkable timing flags",
                         "Bar: reward by action",
                         "Table: questionable OCR/focus states",
                         "Line: exploration history",

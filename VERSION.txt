@@ -1,13 +1,9 @@
-v16-dashboard-superset
+v17-phased-completion-timing
 
-Adds Superset-style executive and engineering dashboards for crawler learning/progress/history:
-- /dashboards
-- /dashboard/exec
-- /dashboard/eng
-- /api/dashboards/summary
-- /api/dashboards/exec
-- /api/dashboards/eng
-- /api/dashboards/tables
-- /api/dashboards/superset.zip
-
-Keeps v15 fork-merge features, v14 timed execution, teacher mode, focus/context perception, parental lab, and intelligence console.
+Adds completion-aware timing intelligence:
+- Learns button press -> first visible action start -> completed/stable screen separately
+- Waits for visual stability before treating a menu/loading transition as complete
+- Recaptures when the final snapshot still looks like a transient/loading frame
+- Stores start/completion/stability timing fields in crawler_brain.json
+- Flags remarkable timing events when completion becomes unexpectedly slow
+- Keeps v16 dashboards, v15 fork merge, v14 timed teacher mode, teacher mode, focus/context perception, parental lab, and intelligence console
