@@ -31,6 +31,17 @@ import numpy as np
 
 from focus_detector import detect_focus
 
+# v18: human-like observer layer; non-fatal so experimental bundles still boot.
+try:
+    from human_observer import observe_human_cues, screen_kind_from_focus, is_transient_focus
+except Exception:  # pragma: no cover
+    def observe_human_cues(frame, focus=None, ocr_text="", metrics=None):
+        return {"screen_kind": "unknown", "is_transient": False, "is_actionable": True, "feature_tags": [], "risk_flags": []}
+    def screen_kind_from_focus(focus):
+        return "unknown"
+    def is_transient_focus(focus):
+        return False
+
 # v15: fork intelligence modules from aBotTesty. These are intentionally
 # non-critical; the crawler must still boot if one module is missing while
 # someone is experimenting with the fork.
@@ -152,6 +163,34 @@ class CrawlerConfig:
     route_replay_gap_s: float = 0.075
     route_replay_checkpoint_s: float = 0.45
 
+    # v17: phased timing.  The crawler now learns three separate events:
+    # button press -> first visible reaction -> completed/stable screen.
+    # This prevents it from treating the first flash of movement as the finished menu.
+    max_completion_observe_s: float = 6.0
+    completion_min_observe_s: float = 0.35
+    completion_quiet_s: float = 0.45
+    completion_stability_threshold: float = 0.992
+    completion_stable_observations_required: int = 3
+    completion_extra_wait_on_incomplete_s: float = 1.2
+    completion_extra_attempts: int = 2
+    remarkable_timing_multiplier: float = 2.75
+    remarkable_timing_min_delta_s: float = 1.0
+
+    # v18: human-observer controls.  These make the crawler act less like a
+    # frame-differencer and more like a person watching TV: wait on loading
+    # interstitials, collapse passive video frames, and bias actions toward the
+    # affordances a human would notice.
+    human_observer_enabled: bool = True
+    human_skip_transient_frontier: bool = True
+    human_collapse_passive_video: bool = True
+    passive_video_similarity_score: float = 0.915
+    loading_similarity_score: float = 0.965
+    human_loading_extra_wait_s: float = 0.65
+    human_loading_max_extra_attempts: int = 4
+    penalty_transient_loading_state: float = -4.0
+    penalty_passive_video_duplicate: float = -1.5
+    reward_human_feature_goal: float = 4.0
+
     # Channel learning controls
     channel_learning_enabled: bool = False
     channel_scan_list: List[int] = field(default_factory=list)
@@ -196,24 +235,92 @@ class CrawlerConfig:
 
 @dataclass
 class ActionTiming:
+    """Per-action timing model.
+
+    v14/v16 only learned a single ``response`` value.  That was really the
+    first visible change, so menus were often captured while still loading.
+    v17 keeps backwards-compatible fields but adds phased timing:
+      - start: first visible reaction after the key press
+      - complete: screen appears stable/finished
+      - stable: local visual stability window duration
+    """
     action: str
     attempts: int = 0
-    avg_response_s: float = 0.0
+    avg_response_s: float = 0.0  # backwards-compatible alias for avg_start_s
     last_response_s: float = 0.0
     min_response_s: float = 999.0
     max_response_s: float = 0.0
 
+    avg_start_s: float = 0.0
+    last_start_s: float = 0.0
+    min_start_s: float = 999.0
+    max_start_s: float = 0.0
+
+    avg_complete_s: float = 0.0
+    last_complete_s: float = 0.0
+    min_complete_s: float = 999.0
+    max_complete_s: float = 0.0
+
+    avg_stable_s: float = 0.0
+    last_stable_s: float = 0.0
+    remarkable_count: int = 0
+    last_remarkable: Optional[Dict[str, Any]] = None
+    last_flags: List[str] = field(default_factory=list)
+
+    @staticmethod
+    def _ema(old: float, new: float, attempts: int) -> float:
+        alpha = 0.30 if attempts <= 5 else 0.15
+        return float(new) if old <= 0 else (1.0 - alpha) * float(old) + alpha * float(new)
+
+    @staticmethod
+    def _safe(v: Optional[float], default: float = 0.0) -> float:
+        try:
+            if v is None:
+                return float(default)
+            return max(0.0, float(v))
+        except Exception:
+            return float(default)
+
     def update(self, response_s: float) -> None:
-        response_s = max(0.0, float(response_s))
+        # Legacy path: treat response as start and complete when only one value exists.
+        self.update_phase(start_s=response_s, complete_s=response_s, stable_s=0.0, flags=[])
+
+    def update_phase(
+        self,
+        start_s: Optional[float],
+        complete_s: Optional[float],
+        stable_s: Optional[float] = 0.0,
+        flags: Optional[List[str]] = None,
+        remarkable: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        start_s = self._safe(start_s, 0.0)
+        complete_s = max(start_s, self._safe(complete_s, start_s))
+        stable_s = self._safe(stable_s, 0.0)
         self.attempts += 1
-        alpha = 0.30 if self.attempts <= 5 else 0.15
-        if self.avg_response_s <= 0:
-            self.avg_response_s = response_s
-        else:
-            self.avg_response_s = (1.0 - alpha) * self.avg_response_s + alpha * response_s
-        self.last_response_s = response_s
-        self.min_response_s = min(self.min_response_s, response_s)
-        self.max_response_s = max(self.max_response_s, response_s)
+
+        self.avg_start_s = self._ema(self.avg_start_s or self.avg_response_s, start_s, self.attempts)
+        self.last_start_s = start_s
+        self.min_start_s = min(self.min_start_s, start_s)
+        self.max_start_s = max(self.max_start_s, start_s)
+
+        self.avg_complete_s = self._ema(self.avg_complete_s, complete_s, self.attempts)
+        self.last_complete_s = complete_s
+        self.min_complete_s = min(self.min_complete_s, complete_s)
+        self.max_complete_s = max(self.max_complete_s, complete_s)
+
+        self.avg_stable_s = self._ema(self.avg_stable_s, stable_s, self.attempts)
+        self.last_stable_s = stable_s
+
+        # Preserve old field names for dashboards/tests/old saved JSON readers.
+        self.avg_response_s = self.avg_start_s
+        self.last_response_s = start_s
+        self.min_response_s = min(self.min_response_s, start_s)
+        self.max_response_s = max(self.max_response_s, start_s)
+
+        self.last_flags = list(flags or [])[:12]
+        if remarkable:
+            self.remarkable_count += 1
+            self.last_remarkable = dict(remarkable)
 
 
 @dataclass
@@ -463,8 +570,71 @@ class FeatureExtractor:
                 val = str(val or "").strip()
                 if val and val not in focus_text_parts:
                     focus_text_parts.append(val)
+        brightness = round(float(np.mean(gray)), 3)
+        variance = round(float(np.var(gray)), 3)
+        entropy = round(self.image_entropy(gray), 4)
+        edge_density = round(self.edge_density(gray), 5)
         merged_text = " ".join([text] + focus_text_parts).strip()[:2200]
-        merged_tokens = sorted(set(self.tokenize(merged_text)) | set(focus.get("tokens", []) if isinstance(focus, dict) else []))[:180]
+
+        # v18: add a human-like interpretation layer.  It recognizes loading
+        # interstitials, passive video, PIN/rating/PPV/timer flows, and suggests
+        # how a human operator would treat the screen.  This is stored inside the
+        # focus dict so old graph readers remain compatible.
+        if isinstance(focus, dict):
+            try:
+                human = observe_human_cues(
+                    frame,
+                    focus=focus,
+                    ocr_text=merged_text,
+                    metrics={"brightness": brightness, "variance": variance, "entropy": entropy, "edge_density": edge_density},
+                )
+                focus["human_cues"] = human
+                fallback_focus = ((human.get("visible_affordances") or {}).get("fallback_focus") or {}) if isinstance(human, dict) else {}
+                if fallback_focus.get("found") and not focus.get("found"):
+                    focus.update({
+                        "found": True,
+                        "confidence": fallback_focus.get("confidence", 0.0),
+                        "bbox": fallback_focus.get("bbox"),
+                        "center_norm": fallback_focus.get("center_norm"),
+                        "row_guess": fallback_focus.get("row_guess"),
+                        "col_guess": fallback_focus.get("col_guess"),
+                        "region": fallback_focus.get("region", "fallback_red_focus"),
+                        "focus_role": "visual_focus_fallback",
+                    })
+                    focus.setdefault("tokens", [])
+                    for tok in fallback_focus.get("tokens", []) or []:
+                        if tok not in focus["tokens"]:
+                            focus["tokens"].append(tok)
+                    # Re-attach the richer focus state for graph consumers.
+                    human["visible_affordances"]["focus_found"] = True
+                    human["visible_affordances"]["focus_confidence"] = float(fallback_focus.get("confidence") or 0.0)
+                if human.get("screen_kind") == "loading_interstitial":
+                    focus["loading"] = True
+                    focus["popup_type"] = focus.get("popup_type") or "loading"
+                if human.get("screen_kind") == "passive_video" and not focus.get("screen_title"):
+                    focus["screen_title"] = "Live TV"
+                if human.get("channel_number") and not focus.get("channel_number"):
+                    focus["channel_number"] = human.get("channel_number")
+                if human.get("channel_name") and not focus.get("channel_name"):
+                    focus["channel_name"] = human.get("channel_name")
+                focus.setdefault("semantic_tags", [])
+                for tag in human.get("feature_tags", []) or []:
+                    if tag not in focus["semantic_tags"]:
+                        focus["semantic_tags"].append(tag)
+                focus.setdefault("risk_flags", [])
+                for flag in human.get("risk_flags", []) or []:
+                    if flag not in focus["risk_flags"]:
+                        focus["risk_flags"].append(flag)
+                focus.setdefault("quality_flags", [])
+                for flag in human.get("annoyance_flags", []) or []:
+                    if flag not in focus["quality_flags"]:
+                        focus["quality_flags"].append(flag)
+                if human.get("summary") and human.get("screen_kind") in {"loading_interstitial", "passive_video", "pin_prompt", "purchase_or_ppv", "timer_or_recording_flow"}:
+                    merged_text = " ".join([merged_text, human.get("summary", ""), " ".join(human.get("feature_tags", []) or [])]).strip()[:2600]
+            except Exception:
+                log.debug("human observer failed", exc_info=True)
+
+        merged_tokens = sorted(set(self.tokenize(merged_text)) | set(focus.get("tokens", []) if isinstance(focus, dict) else []) | set(((focus.get("human_cues") or {}).get("tokens") or []) if isinstance(focus, dict) else []))[:200]
         return ScreenFingerprint(
             state_id=sid,
             timestamp=self._now(),
@@ -472,10 +642,10 @@ class FeatureExtractor:
             ahash=self.average_hash(gray),
             dhash=self.difference_hash(gray),
             phash=self.perceptual_hash(gray),
-            brightness=round(float(np.mean(gray)), 3),
-            variance=round(float(np.var(gray)), 3),
-            entropy=round(self.image_entropy(gray), 4),
-            edge_density=round(self.edge_density(gray), 5),
+            brightness=brightness,
+            variance=variance,
+            entropy=entropy,
+            edge_density=edge_density,
             color_hist=self.color_histogram(frame),
             ocr_text=merged_text,
             ocr_tokens=merged_tokens,
@@ -547,6 +717,26 @@ class SimilarityModel:
         visual_weight = max(0.0, 1.0 - text_weight - focus_weight)
         visual = 0.36 * phash_sim + 0.22 * dhash_sim + 0.10 * ahash_sim + 0.22 * hist_sim + 0.10 * metric_sim
         score = visual_weight * visual + text_weight * text_sim + focus_weight * focus_sim
+
+        # v18: collapse things a human would treat as one state.  Dynamic video
+        # frames should not create thousands of states; loading interstitials are
+        # transient and should match each other strongly if they slip into the graph.
+        ha = fa.get("human_cues") if isinstance(fa.get("human_cues"), dict) else {}
+        hb = fb.get("human_cues") if isinstance(fb.get("human_cues"), dict) else {}
+        ka = str(ha.get("screen_kind") or "")
+        kb = str(hb.get("screen_kind") or "")
+        if ka == kb == "loading_interstitial":
+            score = max(score, 0.965)
+        elif ka == kb == "passive_video":
+            cha = str(ha.get("channel_number") or fa.get("channel_number") or "")
+            chb = str(hb.get("channel_number") or fb.get("channel_number") or "")
+            if cha and chb and cha != chb:
+                score = min(score, 0.72)
+            elif cha and chb and cha == chb:
+                score = max(score, 0.945)
+            else:
+                score = max(score, 0.915)
+
         return {
             "score": round(max(0.0, min(1.0, score)), 5),
             "phash": round(phash_sim, 5),
@@ -899,7 +1089,7 @@ class CrawlerBrain:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "schema": "jamboree_crawler_brain_v6_semantic_context",
+            "schema": "jamboree_crawler_brain_v7_phased_timing",
             "updated_at": self.now(),
             "action_timing": {k: asdict(v) for k, v in self.action_timing.items()},
             "action_rewards": {k: asdict(v) for k, v in self.action_rewards.items()},
@@ -935,9 +1125,40 @@ class CrawlerBrain:
             self.action_timing[action] = ActionTiming(action=action)
         return self.action_timing[action]
 
+    @staticmethod
+    def default_start_expectation(action: str) -> float:
+        a = str(action or "").lower()
+        if a.isdigit():
+            return 0.18
+        if a in {"up", "down", "left", "right"}:
+            return 0.24
+        if a in {"back", "recall"}:
+            return 0.35
+        if a in {"guide", "home", "dvr", "apps", "settings", "options", "info", "input", "live"}:
+            return 0.55
+        if a == "select":
+            return 0.45
+        return 0.40
+
+    @staticmethod
+    def default_completion_expectation(action: str) -> float:
+        a = str(action or "").lower()
+        if a.isdigit():
+            return 0.28
+        if a in {"up", "down", "left", "right"}:
+            return 0.65
+        if a in {"back", "recall"}:
+            return 1.10
+        if a in {"options", "info", "input"}:
+            return 1.35
+        if a in {"guide", "home", "dvr", "apps", "settings", "live"}:
+            return 2.20
+        if a == "select":
+            return 1.65
+        return 1.20
+
     def update_timing(self, action: str, response_s: float, max_sample_s: Optional[float] = None) -> None:
-        # Perception/capture stalls can masquerade as remote latency. Clip those
-        # so one bad OCR/capture does not make future button presses painfully slow.
+        # Legacy compatibility: update both start and complete with the same value.
         try:
             response_s = float(response_s)
             if max_sample_s is not None and max_sample_s > 0:
@@ -946,27 +1167,91 @@ class CrawlerBrain:
             response_s = 0.0
         self.timing_for(action).update(response_s)
 
+    def update_timing_phase(
+        self,
+        action: str,
+        start_s: Optional[float],
+        complete_s: Optional[float],
+        stable_s: Optional[float] = 0.0,
+        cfg: Optional[CrawlerConfig] = None,
+        flags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        timing = self.timing_for(action)
+        # Compare against the already-learned expectation before updating it.
+        expected_start = timing.avg_start_s or timing.avg_response_s or self.default_start_expectation(action)
+        expected_complete = timing.avg_complete_s or self.default_completion_expectation(action)
+        start_val = 0.0 if start_s is None else max(0.0, float(start_s))
+        complete_val = max(start_val, 0.0 if complete_s is None else float(complete_s))
+        max_sample = float(getattr(cfg, "timing_outlier_clip_s", 4.0) or 4.0) if cfg else 4.0
+        # Start timing is a remote reaction latency, so clip it aggressively.
+        clipped_start = min(start_val, max_sample)
+        # Completion can legitimately be longer for guide/home/menu loads.
+        max_complete = max(max_sample, float(getattr(cfg, "max_completion_observe_s", max_sample) or max_sample)) if cfg else max_sample
+        clipped_complete = min(complete_val, max_complete)
+        remarkable: Dict[str, Any] = {}
+        mult = float(getattr(cfg, "remarkable_timing_multiplier", 2.75) or 2.75) if cfg else 2.75
+        min_delta = float(getattr(cfg, "remarkable_timing_min_delta_s", 1.0) or 1.0) if cfg else 1.0
+        out_flags = list(flags or [])
+        if expected_start > 0 and start_val > expected_start * mult and (start_val - expected_start) >= min_delta:
+            out_flags.append("remarkable_slow_start")
+            remarkable["slow_start"] = {"observed_s": round(start_val, 3), "expected_s": round(expected_start, 3)}
+        if expected_complete > 0 and complete_val > expected_complete * mult and (complete_val - expected_complete) >= min_delta:
+            out_flags.append("remarkable_slow_completion")
+            remarkable["slow_completion"] = {"observed_s": round(complete_val, 3), "expected_s": round(expected_complete, 3)}
+        timing.update_phase(
+            start_s=clipped_start,
+            complete_s=clipped_complete,
+            stable_s=stable_s,
+            flags=out_flags,
+            remarkable=remarkable or None,
+        )
+        return {
+            "expected_start_s": round(expected_start, 3),
+            "expected_complete_s": round(expected_complete, 3),
+            "clipped_start_s": round(clipped_start, 3),
+            "clipped_complete_s": round(clipped_complete, 3),
+            "flags": out_flags[:12],
+            "remarkable": remarkable,
+        }
+
     def sanitize_timing_outliers(self, max_avg_s: float = 4.0) -> int:
         fixed = 0
         for timing in self.action_timing.values():
-            if timing.avg_response_s > max_avg_s:
-                timing.avg_response_s = max_avg_s
-                fixed += 1
-            if timing.last_response_s > max_avg_s:
-                timing.last_response_s = max_avg_s
-            if timing.min_response_s > max_avg_s:
-                timing.min_response_s = max_avg_s
-            if timing.max_response_s > max_avg_s * 3:
-                timing.max_response_s = max_avg_s * 3
+            for attr in ("avg_response_s", "last_response_s", "avg_start_s", "last_start_s"):
+                if getattr(timing, attr, 0.0) > max_avg_s:
+                    setattr(timing, attr, max_avg_s)
+                    fixed += 1
+            for attr in ("min_response_s", "min_start_s"):
+                if getattr(timing, attr, 999.0) > max_avg_s:
+                    setattr(timing, attr, max_avg_s)
+            for attr in ("max_response_s", "max_start_s"):
+                if getattr(timing, attr, 0.0) > max_avg_s * 3:
+                    setattr(timing, attr, max_avg_s * 3)
+            # Completion is allowed to be longer, but still cannot grow unbounded.
+            comp_cap = max(max_avg_s, 6.0)
+            for attr in ("avg_complete_s", "last_complete_s"):
+                if getattr(timing, attr, 0.0) > comp_cap:
+                    setattr(timing, attr, comp_cap)
+                    fixed += 1
+            if getattr(timing, "max_complete_s", 0.0) > comp_cap * 2:
+                timing.max_complete_s = comp_cap * 2
         if fixed:
             self.save()
         return fixed
 
+    def expected_start_s(self, action: str, cfg: CrawlerConfig) -> float:
+        timing = self.timing_for(action)
+        if not cfg.adaptive_timing_enabled:
+            return self.default_start_expectation(action)
+        val = timing.avg_start_s or timing.avg_response_s or self.default_start_expectation(action)
+        return max(0.05, min(float(cfg.max_adaptive_observe_s), float(val) * 1.25 + 0.05))
+
     def expected_settle_s(self, action: str, cfg: CrawlerConfig) -> float:
         timing = self.timing_for(action)
-        if not cfg.adaptive_timing_enabled or timing.avg_response_s <= 0:
+        if not cfg.adaptive_timing_enabled:
             return cfg.settle_s
-        return max(cfg.min_settle_s, min(cfg.max_settle_s, timing.avg_response_s * 1.35 + 0.15))
+        val = timing.avg_complete_s or self.default_completion_expectation(action)
+        return max(cfg.min_settle_s, min(float(cfg.max_completion_observe_s), float(val) * 1.25 + 0.20))
 
     def reward_stats_for(self, action: str) -> ActionRewardStats:
         action = str(action)
@@ -1086,6 +1371,29 @@ class CrawlerBrain:
                 risk_flags = focus.get("risk_flags") or ui.get("risk_flags") or []
                 if risk_flags:
                     details["risk_flags"] = risk_flags[:12]
+                # v18 human-observer rewards/penalties: useful features matter,
+                # but transient/loading frames and duplicate passive video should
+                # not be celebrated as navigation discoveries.
+                human = focus.get("human_cues") if isinstance(focus.get("human_cues"), dict) else {}
+                if human:
+                    details["human_cues"] = {
+                        "screen_kind": human.get("screen_kind"),
+                        "confidence": human.get("confidence"),
+                        "feature_tags": human.get("feature_tags", [])[:12],
+                        "test_goals": human.get("test_goals", [])[:6],
+                        "risk_flags": human.get("risk_flags", [])[:12],
+                        "annoyance_flags": human.get("annoyance_flags", [])[:12],
+                    }
+                    kind = str(human.get("screen_kind") or "")
+                    if kind == "loading_interstitial":
+                        reward += float(getattr(cfg, "penalty_transient_loading_state", -4.0))
+                        details["transient_loading_penalty"] = float(getattr(cfg, "penalty_transient_loading_state", -4.0))
+                    elif kind == "passive_video" and created:
+                        reward += float(getattr(cfg, "penalty_passive_video_duplicate", -1.5))
+                        details["passive_video_duplicate_penalty"] = float(getattr(cfg, "penalty_passive_video_duplicate", -1.5))
+                    if human.get("test_goals"):
+                        reward += float(getattr(cfg, "reward_human_feature_goal", 4.0))
+                        details["human_feature_goal_reward"] = float(getattr(cfg, "reward_human_feature_goal", 4.0))
             new_tokens = set(after_fp.ocr_tokens) - self.known_tokens
             if new_tokens:
                 token_reward = min(5.0, len(new_tokens) * cfg.reward_new_text_tokens)
@@ -1374,8 +1682,11 @@ class AutonomousCrawler:
             "reseed_when_idle",
             "fast_known_path_enabled",
             "deep_ocr_on_select",
+            "human_observer_enabled",
+            "human_skip_transient_frontier",
+            "human_collapse_passive_video",
         }
-        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps"}
+        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "completion_stable_observations_required", "completion_extra_attempts", "human_loading_max_extra_attempts", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps"}
         float_fields = {
             "settle_s", "reset_settle_s", "between_key_s", "state_similarity_threshold",
             "changed_similarity_threshold", "reward_new_state", "reward_new_menu", "reward_new_setting",
@@ -1385,7 +1696,7 @@ class AutonomousCrawler:
             "continuous_idle_s", "reward_new_edge", "reward_leads_to_unexplored",
             "penalty_repeat_transition", "penalty_same_state_loop", "repeat_reward_floor_for_retry",
             "curiosity_randomness", "fast_known_action_min_reward", "fast_known_action_success_ratio",
-            "max_adaptive_observe_s", "timing_outlier_clip_s", "route_replay_gap_s", "route_replay_checkpoint_s",
+            "max_adaptive_observe_s", "timing_outlier_clip_s", "route_replay_gap_s", "route_replay_checkpoint_s", "max_completion_observe_s", "completion_min_observe_s", "completion_quiet_s", "completion_stability_threshold", "completion_extra_wait_on_incomplete_s", "remarkable_timing_multiplier", "remarkable_timing_min_delta_s", "passive_video_similarity_score", "loading_similarity_score", "human_loading_extra_wait_s", "penalty_transient_loading_state", "penalty_passive_video_duplicate", "reward_human_feature_goal",
         }
         for key, value in overrides.items():
             if key not in allowed:
@@ -1499,10 +1810,44 @@ class AutonomousCrawler:
             max_attempts_per_state=self.config.max_action_attempts_per_state,
         )
 
+    def _human_cues_for_state(self, state_id: str) -> Dict[str, Any]:
+        node = self.graph.nodes.get(state_id)
+        if not node:
+            return {}
+        focus = node.representative.focus if isinstance(getattr(node.representative, "focus", {}), dict) else {}
+        human = focus.get("human_cues") if isinstance(focus.get("human_cues"), dict) else {}
+        return human
+
+    def _human_screen_kind(self, state_id: str) -> str:
+        return str(self._human_cues_for_state(state_id).get("screen_kind") or "unknown")
+
+    def _state_is_transient(self, state_id: str) -> bool:
+        human = self._human_cues_for_state(state_id)
+        return bool(human.get("is_transient")) or self._human_screen_kind(state_id) == "loading_interstitial"
+
     def remaining_actions_for_state(self, state_id: str) -> List[str]:
         cfg = self.config
+        # v18: humans do not explore loading screens; they wait for them to finish.
+        if getattr(cfg, "human_skip_transient_frontier", True) and self._state_is_transient(state_id):
+            return []
+        allowed_actions = list(cfg.enabled_keys)
+        kind = self._human_screen_kind(state_id)
+        if getattr(cfg, "human_observer_enabled", True):
+            if kind == "passive_video":
+                # Avoid learning thousands of arrow-key outcomes from changing video.
+                preferred = {"guide", "info", "options", "recall", "home", "live", "input", "ch_up", "ch_down", "back"}
+                filtered = [a for a in allowed_actions if str(a).lower() in preferred or str(a).isdigit()]
+                if filtered:
+                    allowed_actions = filtered
+            elif kind == "purchase_or_ppv":
+                # Read/escape only unless operator explicitly drives it in Teacher Mode.
+                preferred = {"info", "back", "home", "options"}
+                allowed_actions = [a for a in allowed_actions if str(a).lower() in preferred]
+            elif kind == "pin_prompt":
+                preferred = {"back", "home"}
+                allowed_actions = [a for a in allowed_actions if str(a).lower() in preferred]
         remaining: List[str] = []
-        for action in cfg.enabled_keys:
+        for action in allowed_actions:
             attempts = self.brain.state_action_attempts(state_id, action)
             avg_reward = self.brain.state_action_avg_reward(state_id, action)
             # New or under-sampled actions are preferred. A repeatedly useful action
@@ -1518,9 +1863,38 @@ class AutonomousCrawler:
         return str(getattr(node.representative, "ui_pattern", "unknown") or "unknown")
 
     def apply_pattern_action_order(self, state_id: str, actions: List[str]) -> List[str]:
-        """v15: reorder actions according to learned UI pattern + sequence hints."""
+        """v15/v18: reorder actions according to UI pattern, sequence hints, and human-observer cues."""
         if not actions:
             return actions
+        human = self._human_cues_for_state(state_id)
+        if human and getattr(self.config, "human_observer_enabled", True):
+            rec = [str(a).lower() for a in human.get("recommended_actions", []) or []]
+            avoid = {str(a).lower() for a in human.get("avoid_actions", []) or []}
+            # Map human-level recommendations to concrete remote keys.
+            rec_map = {
+                "wait": [],
+                "read_focus": [],
+                "read_title_price": ["info", "back"],
+                "info": ["info"],
+                "guide": ["guide"],
+                "options": ["options"],
+                "recall": ["recall"],
+                "home": ["home"],
+                "back": ["back"],
+                "select": ["select"],
+                "up": ["up"], "down": ["down"], "left": ["left"], "right": ["right"],
+                "ch_up": ["ch_up"], "ch_down": ["ch_down"],
+            }
+            priority: List[str] = []
+            for r in rec:
+                priority.extend(rec_map.get(r, [r]))
+            if priority:
+                rank = {a: i for i, a in enumerate(priority)}
+                actions = sorted(actions, key=lambda a: (rank.get(str(a).lower(), 99), actions.index(a)))
+            if avoid:
+                actions = [a for a in actions if str(a).lower() not in avoid]
+                if not actions:
+                    actions = [a for a in self.config.enabled_keys if str(a).lower() in {"back", "home", "info"}]
         pattern = self._pattern_for_state(state_id)
         priority: List[str]
         if pattern == "grid_menu":
@@ -1822,6 +2196,62 @@ class AutonomousCrawler:
         frame, _ = self.wait_for_good_frame(timeout_s=max(1.0, self.config.timing_poll_s * 4))
         return self.probe_extractor.extract(frame, hint_id=f"{hint_prefix}_{uuid.uuid4().hex[:8]}")
 
+    @staticmethod
+    def _action_is_menu_like(action: str) -> bool:
+        a = str(action or "").lower()
+        return a in {
+            "guide", "home", "dvr", "apps", "settings", "options", "info", "input",
+            "select", "back", "recall", "menu", "live", "ddiamond", "diamond"
+        }
+
+    @staticmethod
+    def _text_has_final_modal_or_menu(text: str) -> bool:
+        low = str(text or "").lower()
+        return bool(re.search(
+            r"\b(attention|ok|cancel|settings|options|guide|search|dvr|parental|diagnostics|"
+            r"locked|channels|tv viewing|program|episode|live tv|home|on demand|apps)\b",
+            low,
+        ))
+
+    @staticmethod
+    def _text_has_loading(text: str) -> bool:
+        return bool(re.search(r"\b(loading|please wait|processing|retrieving|starting|connecting|refreshing)\b", str(text or ""), re.I))
+
+    def fingerprint_looks_incomplete(self, fp: ScreenFingerprint, action: str) -> Tuple[bool, List[str]]:
+        """Detect snapshots that look like the first flicker of a transition rather
+        than a completed screen.
+
+        This deliberately stays conservative: video playback screens may have no focus
+        and little OCR, but menu-like actions should usually settle into a focusable UI,
+        a titled modal, or recognizable page/menu text.
+        """
+        reasons: List[str] = []
+        text = fp.ocr_text or ""
+        focus = fp.focus if isinstance(getattr(fp, "focus", {}), dict) else {}
+        human = focus.get("human_cues") if isinstance(focus.get("human_cues"), dict) else {}
+        if human.get("screen_kind") == "loading_interstitial" or human.get("is_transient"):
+            reasons.append("human_loading_interstitial")
+        if self._text_has_loading(text):
+            reasons.append("loading_text")
+        if focus.get("loading"):
+            reasons.append("focus_loading_flag")
+        # A high-confidence focus usually means the UI has settled, unless the
+        # human observer identified the whole screen as a loading interstitial.
+        if focus.get("found") and "human_loading_interstitial" not in reasons:
+            return (bool(reasons), reasons)
+        # A final Attention/OK modal may not have red focus, but it is a final state.
+        if self._text_has_final_modal_or_menu(text):
+            return (bool(reasons), reasons)
+        # Dark/low-information frames immediately after menu-like actions are often
+        # fade/spinner/interstitial frames.  Do not learn them as the destination.
+        token_count = len(getattr(fp, "ocr_tokens", []) or [])
+        if self._action_is_menu_like(action) and token_count < 6:
+            if fp.brightness < 42 or fp.entropy < 3.2 or fp.edge_density < 0.018:
+                reasons.append("low_information_menu_transition")
+        if self._action_is_menu_like(action) and token_count < 3 and fp.entropy < 4.0:
+            reasons.append("weak_menu_ocr_no_focus")
+        return (bool(reasons), reasons)
+
     def wait_after_action(
         self,
         action: str,
@@ -1831,60 +2261,166 @@ class AutonomousCrawler:
     ) -> Tuple[ScreenFingerprint, float, Dict[str, Any]]:
         cfg = self.config
         if force_settle_s is not None:
+            start = time.time()
             time.sleep(max(cfg.min_settle_s, float(force_settle_s)))
-            return self.capture_fingerprint(hint_prefix="after", perception=perception), float(force_settle_s), {"mode": "forced", "perception": perception}
+            after = self.capture_fingerprint(hint_prefix="after", perception=perception)
+            complete_s = time.time() - start
+            phase = self.brain.update_timing_phase(
+                action,
+                start_s=complete_s,
+                complete_s=complete_s,
+                stable_s=0.0,
+                cfg=cfg,
+                flags=["forced_settle"],
+            )
+            return after, complete_s, {
+                "mode": "forced",
+                "perception": perception,
+                "action_start_s": round(complete_s, 3),
+                "action_complete_s": round(complete_s, 3),
+                "response_s": round(complete_s, 3),
+                "completion_s": round(complete_s, 3),
+                "phase_learning": phase,
+            }
         if not cfg.adaptive_timing_enabled:
-            time.sleep(min(cfg.settle_s, cfg.max_adaptive_observe_s))
-            return self.capture_fingerprint(hint_prefix="after", perception=perception), min(cfg.settle_s, cfg.max_adaptive_observe_s), {"mode": "fixed", "perception": perception}
+            start = time.time()
+            sleep_s = min(cfg.settle_s, cfg.max_completion_observe_s)
+            time.sleep(sleep_s)
+            after = self.capture_fingerprint(hint_prefix="after", perception=perception)
+            complete_s = time.time() - start
+            phase = self.brain.update_timing_phase(action, complete_s, complete_s, 0.0, cfg=cfg, flags=["fixed_settle"])
+            return after, complete_s, {
+                "mode": "fixed",
+                "perception": perception,
+                "action_start_s": round(complete_s, 3),
+                "action_complete_s": round(complete_s, 3),
+                "response_s": round(complete_s, 3),
+                "completion_s": round(complete_s, 3),
+                "phase_learning": phase,
+            }
 
-        expected = self.brain.expected_settle_s(action, cfg)
-        # Hard cap observation time. This protects button pacing from capture/OCR stalls.
-        hard_cap = max(cfg.min_settle_s, min(float(cfg.max_adaptive_observe_s), float(cfg.max_settle_s)))
-        deadline = time.time() + max(cfg.min_settle_s, min(hard_cap, expected))
-        earliest = time.time() + max(cfg.min_settle_s, min(expected, cfg.max_settle_s))
+        expected_start = self.brain.expected_start_s(action, cfg)
+        expected_complete = self.brain.expected_settle_s(action, cfg)
         start = time.time()
+        # Completion timeout is intentionally larger than old max_adaptive_observe_s.
+        # We still use quick visual fingerprints during the wait, so this does not
+        # introduce OCR stalls between button presses.
+        observe_cap = max(
+            cfg.min_settle_s,
+            min(float(cfg.max_completion_observe_s), max(expected_complete * 1.55 + 0.35, cfg.max_adaptive_observe_s)),
+        )
+        deadline = start + observe_cap
+        min_complete_time = start + max(float(cfg.completion_min_observe_s), min(expected_start + cfg.completion_quiet_s, observe_cap))
         first_change_s: Optional[float] = None
+        completion_s: Optional[float] = None
         stable_count = 0
+        stable_window_s = 0.0
         previous: Optional[ScreenFingerprint] = None
         last: Optional[ScreenFingerprint] = None
-        debug: Dict[str, Any] = {"mode": "adaptive", "expected_s": round(expected, 3), "samples": []}
+        flags: List[str] = []
+        debug: Dict[str, Any] = {
+            "mode": "phased_adaptive",
+            "expected_start_s": round(expected_start, 3),
+            "expected_complete_s": round(expected_complete, 3),
+            "observe_cap_s": round(observe_cap, 3),
+            "samples": [],
+        }
 
         while time.time() < deadline:
             time.sleep(max(0.05, cfg.timing_poll_s))
             try:
                 current = self.quick_fingerprint("timing")
-            except Exception:
+            except Exception as exc:
+                flags.append("quick_fingerprint_failed")
+                debug["last_quick_error"] = str(exc)
                 continue
+            now = time.time()
             last = current
             before_cmp = SimilarityModel.compare(before_fp, current)
             prev_cmp = SimilarityModel.compare(previous, current) if previous else {"score": 0.0}
-            debug["samples"].append({
-                "t": round(time.time() - start, 3),
+            sample = {
+                "t": round(now - start, 3),
                 "before": before_cmp["score"],
                 "previous": prev_cmp["score"],
-            })
-            debug["samples"] = debug["samples"][-8:]
+                "brightness": current.brightness,
+                "entropy": current.entropy,
+                "edge_density": current.edge_density,
+            }
+            debug["samples"].append(sample)
+            debug["samples"] = debug["samples"][-12:]
             if first_change_s is None and before_cmp["score"] < cfg.changed_similarity_threshold:
-                first_change_s = time.time() - start
-            if previous and prev_cmp["score"] >= cfg.stable_similarity_threshold:
+                first_change_s = now - start
+            if previous and prev_cmp["score"] >= cfg.completion_stability_threshold:
                 stable_count += 1
+                stable_window_s += max(0.0, float(cfg.timing_poll_s))
             else:
                 stable_count = 0
+                stable_window_s = 0.0
             previous = current
-            if time.time() >= earliest and stable_count >= cfg.stable_observations_required:
+            if first_change_s is not None and now >= min_complete_time and stable_count >= max(1, int(cfg.completion_stable_observations_required)):
+                completion_s = now - start
                 break
 
-        response_s = first_change_s if first_change_s is not None else max(expected, time.time() - start)
-        clipped_response_s = min(float(response_s), float(cfg.timing_outlier_clip_s))
-        self.brain.update_timing(action, clipped_response_s, max_sample_s=cfg.timing_outlier_clip_s)
-        # Capture a saved fingerprint once the screen is believed stable. In fast
-        # mode this skips OCR; callers can deep-recapture only if the transition is new/surprising.
+        if first_change_s is None:
+            # No visible movement. This can be a legitimate no-op, so completion is
+            # the observation duration rather than a fake large response.
+            first_change_s = 0.0
+            flags.append("no_visible_start")
+        if completion_s is None:
+            completion_s = time.time() - start
+            flags.append("completion_uncertain")
+
+        # Full/fast final perception only happens after the visual completion gate.
         after_fp = self.capture_fingerprint(hint_prefix="after", perception=perception) if last is not None else self.capture_fingerprint(hint_prefix="after", perception=perception)
-        debug["response_s"] = round(clipped_response_s, 3)
-        debug["raw_response_s"] = round(float(response_s), 3)
-        debug["perception"] = perception
-        debug["stable_count"] = stable_count
-        return after_fp, response_s, debug
+
+        # If final capture still looks like a transient menu-loading frame, keep
+        # watching briefly and recapture.  This is the direct fix for learning the
+        # first half of a menu transition as the final destination.
+        recovery: List[Dict[str, Any]] = []
+        extra_attempts = max(0, int(cfg.completion_extra_attempts))
+        if getattr(cfg, "human_observer_enabled", True):
+            extra_attempts = max(extra_attempts, int(getattr(cfg, "human_loading_max_extra_attempts", extra_attempts)))
+        for attempt in range(extra_attempts):
+            incomplete, reasons = self.fingerprint_looks_incomplete(after_fp, action)
+            if not incomplete:
+                break
+            flags.extend([r for r in reasons if r not in flags])
+            wait_s = max(0.10, float(cfg.completion_extra_wait_on_incomplete_s))
+            if "human_loading_interstitial" in reasons:
+                wait_s = max(wait_s, float(getattr(cfg, "human_loading_extra_wait_s", wait_s)))
+            time.sleep(wait_s)
+            after_fp = self.capture_fingerprint(hint_prefix="after_complete", perception=perception)
+            completion_s = time.time() - start
+            recovery.append({"attempt": attempt + 1, "wait_s": wait_s, "reasons": reasons, "completion_s": round(completion_s, 3)})
+        if recovery:
+            flags.append("post_completion_recapture")
+
+        phase = self.brain.update_timing_phase(
+            action,
+            start_s=first_change_s,
+            complete_s=completion_s,
+            stable_s=stable_window_s,
+            cfg=cfg,
+            flags=flags,
+        )
+        debug.update({
+            "perception": perception,
+            "action_start_s": round(float(first_change_s), 3),
+            "action_complete_s": round(float(completion_s), 3),
+            "stable_window_s": round(float(stable_window_s), 3),
+            # Legacy field names remain, but response is now explicitly the start.
+            "response_s": round(float(first_change_s), 3),
+            "raw_response_s": round(float(first_change_s), 3),
+            "completion_s": round(float(completion_s), 3),
+            "raw_completion_s": round(float(completion_s), 3),
+            "stable_count": stable_count,
+            "flags": list(dict.fromkeys(flags))[:16],
+            "recovery": recovery,
+            "phase_learning": phase,
+        })
+        if phase.get("remarkable"):
+            self.event("warning", "remarkable action timing", action=action, timing=debug)
+        return after_fp, float(completion_s), debug
 
     def current_state_id(self) -> Tuple[str, bool, Dict[str, float]]:
         fp = self.capture_fingerprint()
@@ -1951,7 +2487,12 @@ class AutonomousCrawler:
         if action_lower == "select" and not cfg.allow_select_on_dangerous_text:
             node = self.graph.nodes.get(from_state)
             text = " ".join([before_fp.ocr_text, node.representative.ocr_text if node else ""])
-            if DANGEROUS_TEXT.search(text):
+            human = (before_fp.focus or {}).get("human_cues") if isinstance(getattr(before_fp, "focus", {}), dict) else {}
+            human_risky_select = isinstance(human, dict) and (
+                human.get("screen_kind") in {"purchase_or_ppv", "pin_prompt"}
+                or bool(set(human.get("risk_flags", []) or []) & {"purchase_flow", "pin_required"})
+            )
+            if DANGEROUS_TEXT.search(text) or human_risky_select:
                 edge = self.graph.record_edge(from_state, action_norm, from_state, False, False, 0.0, {"blocked": "dangerous_text"})
                 reward, reward_details = self.brain.score_observation(cfg, action_norm, before_fp, before_fp, False, False, blocked=True)
                 self.brain.save()

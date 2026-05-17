@@ -38,6 +38,7 @@ from focus_detector import detect_focus, draw_focus_overlay  # noqa: E402
 from parental_control_agent import ParentalControlAgent  # noqa: E402
 from manual_teaching_recorder import ManualTeachingRecorder  # noqa: E402
 from dashboard_analytics import DashboardDataset  # noqa: E402
+from human_playbooks import all_playbooks, playbooks_for_cues, backlog_from_graph  # noqa: E402
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
 
@@ -1074,6 +1075,46 @@ def api_teach_explore_from_here():
         return jsonify(ok=False, error=str(exc), teacher=teacher.status(), crawler=crawler.status()), 500
 
 
+
+@app.route("/human")
+def human_page() -> Response:
+    return Response("""<!doctype html><html><head><title>Human Observer</title><style>
+body{font-family:Segoe UI,Arial;background:#101318;color:#f4f4f5;margin:24px}.card{background:#181d25;border:1px solid #303746;border-radius:14px;padding:16px;margin:12px 0}button{background:#2563eb;color:#fff;border:0;border-radius:9px;padding:9px 12px;margin:4px;cursor:pointer}pre{white-space:pre-wrap;background:#0b0e13;border:1px solid #2b3240;border-radius:10px;padding:12px;max-height:520px;overflow:auto}.pill{display:inline-block;padding:4px 9px;border-radius:999px;background:#263449}.small{color:#a1a1aa}.row{display:flex;gap:14px;flex-wrap:wrap}.col{flex:1;min-width:360px}</style></head><body>
+<h1>Human Observer</h1><p class=small>Shows what the crawler thinks a careful human would notice: transient loading, passive video, PIN/PPV/timer/settings cues, risks, annoyance flags, and matching test playbooks.</p>
+<div class=row><div class=col><div class=card><button onclick="current()">Analyze current screen</button><button onclick="backlog()">Load goal backlog</button><button onclick="playbooks()">Show playbooks</button><button onclick="location.href='/intelligence'">Intelligence</button><button onclick="location.href='/dashboards'">Dashboards</button><pre id=out>ready</pre></div></div><div class=col><div class=card><h3>Current snapshot</h3><img id=img src="/snapshot.jpg" style="max-width:100%;border-radius:12px;border:1px solid #333"><p class=small>Refresh current screen after analysis.</p></div></div></div>
+<script>
+async function post(u,b={}){let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return await r.json()}
+async function get(u){let r=await fetch(u); return await r.json()}
+async function current(){document.getElementById('out').textContent='analyzing...';let j=await get('/api/human/current');document.getElementById('out').textContent=JSON.stringify(j,null,2);document.getElementById('img').src='/snapshot.jpg?t='+Date.now()}
+async function backlog(){document.getElementById('out').textContent=JSON.stringify(await get('/api/human/backlog?limit=80'),null,2)}
+async function playbooks(){document.getElementById('out').textContent=JSON.stringify(await get('/api/human/playbooks'),null,2)}
+current();
+</script></body></html>""", mimetype="text/html")
+
+
+@app.route("/api/human/playbooks")
+def api_human_playbooks():
+    return jsonify(ok=True, playbooks=all_playbooks())
+
+
+@app.route("/api/human/backlog")
+def api_human_backlog():
+    limit = int(request.args.get("limit", 100))
+    return jsonify(ok=True, backlog=backlog_from_graph(CRAWLER_DIR, limit=limit))
+
+
+@app.route("/api/human/current", methods=["GET", "POST"])
+def api_human_current():
+    try:
+        fp = crawler.capture_fingerprint("human_current", perception="full")
+        focus = fp.focus if isinstance(fp.focus, dict) else {}
+        cues = focus.get("human_cues") if isinstance(focus.get("human_cues"), dict) else {}
+        return jsonify(ok=True, state={"label": crawler.focus_label(fp), "ocr_text": fp.ocr_text, "tokens": fp.ocr_tokens[:80], "focus": focus}, human_cues=cues, playbooks=playbooks_for_cues(cues))
+    except Exception as exc:
+        log.exception("human current analysis failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
 @app.route("/parental")
 def parental_page() -> Response:
     return Response("""
@@ -1367,7 +1408,7 @@ function renderEng() {{
   let html = `<div class='grid'>`;
   html += kpi('States', h.states||0); html += kpi('Edges', h.transitions||0); html += kpi('Coverage', pct(h.coverage_pct)); html += kpi('Quality', pct(h.perception_quality_pct));
   html += table('Per-action coverage', d.per_action_coverage||[], [{{k:'action'}},{{k:'tried'}},{{k:'total'}},{{k:'coverage_pct',t:'coverage %'}}], 'span-6', 30);
-  html += table('Action timing / rewards', d.actions||[], [{{k:'action'}},{{k:'avg_reward'}},{{k:'reward_attempts'}},{{k:'avg_response_s'}},{{k:'max_response_s'}}], 'span-6', 40);
+  html += table('Action timing / rewards', d.actions||[], [{{k:'action'}},{{k:'avg_reward'}},{{k:'reward_attempts'}},{{k:'avg_start_s'}},{{k:'avg_complete_s'}},{{k:'remarkable_count'}},{{k:'last_flags'}}], 'span-6', 40);
   html += bars('Exploration history: edges seen/hour', d.timeline||[], 'bucket', 'edge_seen', 'span-6');
   html += table('Quality breakdown', d.quality_breakdown||[], [{{k:'quality'}},{{k:'count'}}], 'span-3', 10);
   html += table('Pattern breakdown', d.pattern_breakdown||[], [{{k:'pattern'}},{{k:'count'}}], 'span-3', 20);
