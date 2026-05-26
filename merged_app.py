@@ -119,7 +119,12 @@ CFG = load_config()
 if os.getenv("MERGED_SERVER_PORT"):
     CFG["server_port"] = int(os.getenv("MERGED_SERVER_PORT", CFG["server_port"]))
 if os.getenv("MERGED_CAPTURE_DEVICE"):
-    CFG["capture_device"] = int(os.getenv("MERGED_CAPTURE_DEVICE", CFG["capture_device"]))
+    _dev = os.getenv("MERGED_CAPTURE_DEVICE", str(CFG["capture_device"]))
+    # Keep as string if it looks like a URL, otherwise convert to int (device index)
+    try:
+        CFG["capture_device"] = int(_dev) if not _dev.startswith(("rtsp://", "rtmp://", "http://", "https://")) else _dev
+    except ValueError:
+        CFG["capture_device"] = _dev  # Keep as string (URL or path)
 SNAPSHOT_DIR = (ROOT / str(CFG["snapshot_dir"])).resolve()
 LOG_DIR = (ROOT / str(CFG["log_dir"])).resolve()
 CRAWLER_DIR = (ROOT / str(CFG["crawler_dir"])).resolve()
