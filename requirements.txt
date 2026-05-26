@@ -1,0 +1,8 @@
+flask>=3.0.0
+requests>=2.31.0
+opencv-python>=4.8.0
+numpy>=1.26.0
+Pillow>=9.0.0
+pyserial>=3.5
+paramiko>=3.4.0
+pytesseract>=0.3.10  # optional OCR wrapper; Tesseract binary still required for OCR

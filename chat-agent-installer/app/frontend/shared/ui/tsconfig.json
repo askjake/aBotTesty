@@ -1,0 +1,21 @@
+{
+  "extends": "@shared/typescript-config/nextjs.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "target": "ES2022",
+    "paths": {
+      "@shared/ui/*": [
+        "./src/*"
+      ],
+    }
+  },
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ],
+}

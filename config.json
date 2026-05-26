@@ -1,0 +1,96 @@
+{
+  "server_host": "0.0.0.0",
+  "server_port": 8502,
+  "stb_alias": "found1",
+  "remote": "sgs",
+  "default_delay_ms": 120,
+  "capture_device": 1,
+  "capture_backend": "dshow",
+  "capture_width": 1280,
+  "capture_height": 720,
+  "capture_fps": 30,
+  "signal_min_brightness": 8.0,
+  "signal_min_variance": 25.0,
+  "motion_threshold": 2.0,
+  "snapshot_dir": "snapshots",
+  "log_dir": "logs",
+  "crawler_dir": "crawler_data",
+  "crawler_enabled_keys": [
+    "up",
+    "down",
+    "left",
+    "right",
+    "guide",
+    "back",
+    "home",
+    "info",
+    "select"
+  ],
+  "crawler_max_steps": 0,
+  "crawler_max_states": 0,
+  "crawler_max_depth": 15,
+  "crawler_state_similarity_threshold": 0.86,
+  "crawler_changed_similarity_threshold": 0.94,
+  "crawler_ocr_enabled": true,
+  "crawler_allow_select_on_dangerous_text": false,
+  "crawler_start_sequence": [],
+  "crawler_self_explore_enabled": true,
+  "crawler_adaptive_timing_enabled": true,
+  "crawler_min_settle_s": 0.35,
+  "crawler_max_settle_s": 3.5,
+  "crawler_channel_learning_enabled": false,
+  "crawler_channel_scan_list": [
+    200,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    220,
+    230
+  ],
+  "crawler_channel_digit_gap_s": 0.075,
+  "crawler_channel_tune_settle_s": 2.2,
+  "crawler_continuous_exploration_enabled": true,
+  "crawler_reseed_when_idle": true,
+  "crawler_idle_reseed_every_cycles": 1,
+  "crawler_max_cycles": 0,
+  "crawler_anchor_sequences": [
+    [
+      "back"
+    ],
+    [
+      "home"
+    ],
+    [
+      "home",
+      "guide"
+    ],
+    [
+      "live"
+    ],
+    [
+      "guide"
+    ],
+    [
+      "home",
+      "dvr"
+    ],
+    [
+      "home",
+      "settings"
+    ],
+    [
+      "info"
+    ],
+    [
+      "options"
+    ],
+    [
+      "input"
+    ]
+  ],
+  "crawler_max_action_attempts_per_state": 10,
+  "crawler_repeat_reward_floor_for_retry": 1.0
+}

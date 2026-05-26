@@ -1,0 +1,9 @@
+v17-phased-completion-timing
+
+Adds completion-aware timing intelligence:
+- Learns button press -> first visible action start -> completed/stable screen separately
+- Waits for visual stability before treating a menu/loading transition as complete
+- Recaptures when the final snapshot still looks like a transient/loading frame
+- Stores start/completion/stability timing fields in crawler_brain.json
+- Flags remarkable timing events when completion becomes unexpectedly slow
+- Keeps v16 dashboards, v15 fork merge, v14 timed teacher mode, teacher mode, focus/context perception, parental lab, and intelligence console
