@@ -1,6 +1,6 @@
 {
   "server_host": "0.0.0.0",
-  "server_port": 8502,
+  "server_port": 8503,
   "stb_alias": "found1",
   "remote": "sgs",
   "default_delay_ms": 120,
