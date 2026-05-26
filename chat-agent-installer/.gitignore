@@ -1,0 +1,48 @@
+# Environment files with secrets
+.env.local
+.env.*.local
+*.secret
+*_secret.*
+
+# Credentials and keys
+*password*
+*credentials*
+*token*
+*.pem
+*.key
+*.cert
+
+# Sensitive scripts
+transfer_bundle.sh
+deploy_to_*.sh
+
+# Node modules and build artifacts
+node_modules/
+dist/
+build/
+.next/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# Backup files
+*.bak
+*.backup
+backup/
