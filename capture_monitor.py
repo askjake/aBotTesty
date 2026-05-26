@@ -5,6 +5,8 @@ The monitor is intentionally boring and sturdy:
 - one background thread owns cv2.VideoCapture
 - callers can ask for latest JPEG/frame/status without touching cv2 directly
 - active-video is inferred from brightness + variance + motion
+
+Supports both local capture cards (device index) and network RTSP streams (URL).
 """
 from __future__ import annotations
 
@@ -26,7 +28,21 @@ _BACKEND_MAP = {
     "dshow": getattr(cv2, "CAP_DSHOW", cv2.CAP_ANY),
     "msmf": getattr(cv2, "CAP_MSMF", cv2.CAP_ANY),
     "v4l2": getattr(cv2, "CAP_V4L2", cv2.CAP_ANY),
+    "ffmpeg": getattr(cv2, "CAP_FFMPEG", cv2.CAP_ANY),
 }
+
+# Common RTSP path patterns for Hi3520D and similar encoders
+_RTSP_PATH_CANDIDATES = [
+    "",           # root
+    "/0",
+    "/1",
+    "/live/0/main",
+    "/live0",
+    "/stream1",
+    "/ch0",
+    "/main",
+    "/h264",
+]
 
 
 @dataclass
@@ -48,6 +64,15 @@ class VideoStatus:
     fps_estimate: float = 0.0
     last_frame_age_s: Optional[float] = None
     last_frame_ts: Optional[float] = None
+    device_type: str = "local"  # "local" or "rtsp"
+    rtsp_url: str = ""
+
+
+def is_rtsp_url(device) -> bool:
+    """Check if device specifier is a network stream URL."""
+    if isinstance(device, str):
+        return device.lower().startswith(("rtsp://", "rtmp://", "http://", "https://"))
+    return False
 
 
 class CaptureMonitor:
@@ -61,19 +86,31 @@ class CaptureMonitor:
         signal_min_brightness: float = 8.0,
         signal_min_variance: float = 25.0,
         motion_threshold: float = 2.0,
+        rtsp_reconnect_delay: float = 2.0,
+        rtsp_tcp_transport: bool = True,
     ) -> None:
         self.device = device
         self.backend_name = backend.lower()
-        self.backend = _BACKEND_MAP.get(self.backend_name, cv2.CAP_ANY)
-        if platform.system().lower() != "windows" and self.backend_name == "dshow":
-            # Keeps Linux/macOS smoke tests from failing merely because DSHOW is Windows-only.
-            self.backend = cv2.CAP_ANY
+        self._is_rtsp = is_rtsp_url(device)
+
+        # For RTSP streams, always use FFMPEG backend
+        if self._is_rtsp:
+            self.backend = _BACKEND_MAP.get("ffmpeg", cv2.CAP_ANY)
+            self.backend_name = "ffmpeg"
+            log.info(f"RTSP stream mode: {device}")
+        else:
+            self.backend = _BACKEND_MAP.get(self.backend_name, cv2.CAP_ANY)
+            if platform.system().lower() != "windows" and self.backend_name == "dshow":
+                self.backend = cv2.CAP_ANY
+
         self.width = int(width)
         self.height = int(height)
         self.fps = int(fps)
         self.signal_min_brightness = float(signal_min_brightness)
         self.signal_min_variance = float(signal_min_variance)
         self.motion_threshold = float(motion_threshold)
+        self.rtsp_reconnect_delay = float(rtsp_reconnect_delay)
+        self.rtsp_tcp_transport = rtsp_tcp_transport
 
         self._lock = threading.RLock()
         self._cap: Optional[cv2.VideoCapture] = None
@@ -85,6 +122,11 @@ class CaptureMonitor:
         self._prev_gray_small: Optional[np.ndarray] = None
         self._status = VideoStatus()
         self._fps_window: list[float] = []
+
+        # Set device type in status
+        if self._is_rtsp:
+            self._status.device_type = "rtsp"
+            self._status.rtsp_url = str(device)
 
     def start(self) -> None:
         with self._lock:
@@ -137,7 +179,85 @@ class CaptureMonitor:
                 log.exception("capture release failed")
         self._cap = None
 
-    def _open_locked(self) -> bool:
+    def _open_rtsp_locked(self) -> bool:
+        """Open an RTSP stream with appropriate options."""
+        self._release_locked()
+
+        device_url = str(self.device)
+
+        # Set FFMPEG/RTSP environment for lower latency
+        # cv2 uses environment variables for some FFMPEG options
+        import os
+        if self.rtsp_tcp_transport:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
+
+        cap = cv2.VideoCapture(device_url, self.backend)
+
+        if not cap.isOpened():
+            # If the base URL didn't work and it doesn't have a path, try common paths
+            if device_url.rstrip("/").count("/") <= 2:  # e.g. rtsp://host:554
+                base = device_url.rstrip("/")
+                for path in _RTSP_PATH_CANDIDATES:
+                    test_url = f"{base}{path}" if path else base
+                    log.debug(f"Trying RTSP path: {test_url}")
+                    cap = cv2.VideoCapture(test_url, self.backend)
+                    if cap.isOpened():
+                        # Verify we can get a frame
+                        ok, frame = cap.read()
+                        if ok and frame is not None and frame.size:
+                            self.device = test_url
+                            self._status.rtsp_url = test_url
+                            log.info(f"RTSP stream found at: {test_url}")
+                            self._cap = cap
+                            self._status.open_count += 1
+                            self._status.fail_streak = 0
+                            self._status.status = "streaming"
+                            self._status.width = int(frame.shape[1])
+                            self._status.height = int(frame.shape[0])
+                            self._status.backend = "FFMPEG"
+                            self._store_frame_locked(frame)
+                            return True
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+
+            self._status.status = "error"
+            self._status.last_error = f"cannot open RTSP stream: {device_url}"
+            log.warning(f"Failed to open RTSP stream: {device_url}")
+            return False
+
+        # Successfully opened - verify with a frame read
+        frame = None
+        for _ in range(30):  # RTSP may need more warmup frames
+            ok, maybe = cap.read()
+            if ok and maybe is not None and maybe.size:
+                frame = maybe
+                break
+            time.sleep(0.1)
+
+        if frame is None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+            self._status.status = "error"
+            self._status.last_error = f"RTSP stream opened but no frames received: {device_url}"
+            return False
+
+        self._cap = cap
+        self._status.open_count += 1
+        self._status.fail_streak = 0
+        self._status.status = "streaming"
+        self._status.width = int(frame.shape[1])
+        self._status.height = int(frame.shape[0])
+        self._status.backend = "FFMPEG"
+        self._store_frame_locked(frame)
+        log.info(f"RTSP stream connected: {device_url} ({frame.shape[1]}x{frame.shape[0]})")
+        return True
+
+    def _open_local_locked(self) -> bool:
+        """Open a local capture device (V4L2/DSHOW/etc)."""
         self._release_locked()
         cap = cv2.VideoCapture(self.device, self.backend)
         if not cap.isOpened():
@@ -182,6 +302,12 @@ class CaptureMonitor:
             self._status.backend = self.backend_name.upper()
         self._store_frame_locked(frame)
         return True
+
+    def _open_locked(self) -> bool:
+        """Open the capture source (dispatches to RTSP or local)."""
+        if self._is_rtsp:
+            return self._open_rtsp_locked()
+        return self._open_local_locked()
 
     def _store_frame_locked(self, frame: np.ndarray) -> None:
         now = time.time()
@@ -232,7 +358,9 @@ class CaptureMonitor:
             if cap is None:
                 with self._lock:
                     self._open_locked()
-                time.sleep(0.2)
+                # Use longer delay for RTSP reconnection
+                delay = self.rtsp_reconnect_delay if self._is_rtsp else 0.2
+                time.sleep(delay)
                 continue
 
             try:
@@ -242,7 +370,8 @@ class CaptureMonitor:
                     self._status.last_error = f"read exception: {exc}"
                     self._status.status = "error"
                     self._release_locked()
-                time.sleep(0.5)
+                delay = self.rtsp_reconnect_delay if self._is_rtsp else 0.5
+                time.sleep(delay)
                 continue
 
             if ok and frame is not None and frame.size:
@@ -260,6 +389,8 @@ class CaptureMonitor:
                 with self._lock:
                     self._status.status = "reconnecting"
                     self._release_locked()
-                time.sleep(1.0)
+                delay = self.rtsp_reconnect_delay if self._is_rtsp else 1.0
+                log.warning(f"Reconnecting after {streak} failed reads...")
+                time.sleep(delay)
             else:
                 time.sleep(0.08)
