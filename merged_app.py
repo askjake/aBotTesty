@@ -1496,9 +1496,28 @@ def api_self_test():
     return jsonify(ok=all(checks.values()), checks=checks, video=monitor.get_status(), stb=store.get(alias))
 
 
+def _find_available_port(host: str, start_port: int, max_attempts: int = 20) -> int:
+    """Find the next available TCP port starting from start_port."""
+    import socket
+    for offset in range(max_attempts):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+                return port
+        except OSError:
+            log.debug("Port %d in use, trying next...", port)
+            continue
+    raise RuntimeError(f"No available port found in range {start_port}-{start_port + max_attempts - 1}")
+
+
 def main() -> None:
     host = str(CFG["server_host"])
-    port = int(CFG["server_port"])
+    preferred_port = int(CFG["server_port"])
+    port = _find_available_port(host, preferred_port)
+    if port != preferred_port:
+        log.warning("Port %d in use — using next available: %d", preferred_port, port)
     log.info("Merged app starting on http://%s:%s/monitor", host, port)
     log.info("JAMBOREE_BASE=%s", os.environ.get("JAMBOREE_BASE"))
     log.info("Controlling STB alias=%s via remote=%s", CFG["stb_alias"], CFG["remote"])
