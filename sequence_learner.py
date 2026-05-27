@@ -20,6 +20,8 @@ class LearnedSequence:
     avg_time_s: float = 0.0
     last_used: Optional[str] = None
     confidence: float = 0.0
+    source_counts: Dict[str, int] = field(default_factory=dict)
+    demonstration_weight: float = 1.0
 
 
 class SequenceLearner:
@@ -38,8 +40,17 @@ class SequenceLearner:
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    def record_action(self, from_state: str, action: str, to_state: str, reward: float, time_s: float = 0.0) -> None:
-        self.action_history.append({"from": from_state, "action": str(action), "to": to_state, "reward": float(reward or 0.0), "time_s": float(time_s or 0.0), "timestamp": self._now()})
+    def record_action(self, from_state: str, action: str, to_state: str, reward: float, time_s: float = 0.0, source: str = "autonomous", weight: float = 1.0) -> None:
+        self.action_history.append({
+            "from": from_state,
+            "action": str(action),
+            "to": to_state,
+            "reward": float(reward or 0.0),
+            "time_s": float(time_s or 0.0),
+            "source": str(source or "autonomous"),
+            "weight": max(0.1, float(weight or 1.0)),
+            "timestamp": self._now(),
+        })
 
     def mine_sequences(self, min_length: int = 2, max_length: int = 5, min_occurrences: int = 3, min_avg_reward: float = 2.0) -> List[LearnedSequence]:
         hist = list(self.action_history)
@@ -53,13 +64,15 @@ class SequenceLearner:
                 if count < min_occurrences:
                     continue
                 key = ",".join(seq)
-                rewards, contexts, dests, times = [], [], [], []
+                rewards, contexts, dests, times, sources = [], [], [], [], []
                 for i in range(0, len(actions)-length+1):
                     if tuple(actions[i:i+length]) == seq:
-                        rewards.append(sum(float(x.get("reward", 0.0)) for x in hist[i:i+length]))
+                        window = hist[i:i+length]
+                        rewards.append(sum(float(x.get("reward", 0.0)) * max(0.1, float(x.get("weight", 1.0) or 1.0)) for x in window))
                         contexts.append(hist[i].get("from", ""))
                         dests.append(hist[i+length-1].get("to", ""))
-                        times.append(sum(float(x.get("time_s", 0.0)) for x in hist[i:i+length]))
+                        times.append(sum(float(x.get("time_s", 0.0)) for x in window))
+                        sources.extend(str(x.get("source") or "autonomous") for x in window)
                 avg_reward = sum(rewards) / max(1, len(rewards))
                 if avg_reward < min_avg_reward:
                     continue
@@ -69,7 +82,11 @@ class SequenceLearner:
                 learned.avg_time_s = round(sum(times)/max(1, len(times)), 3)
                 learned.typical_context = list(dict.fromkeys(contexts))[:8]
                 learned.leads_to = list(dict.fromkeys(dests))[:8]
-                learned.confidence = round(min(1.0, (count / 8.0) * max(0.1, min(1.0, avg_reward / 10.0))), 4)
+                src_counts = Counter(sources)
+                learned.source_counts = dict(src_counts)
+                demo_obs = sum(v for k, v in src_counts.items() if k.startswith("manual") or "operator" in k)
+                learned.demonstration_weight = round(1.0 + min(3.0, demo_obs / max(1, count)), 3)
+                learned.confidence = round(min(1.0, (count / 8.0) * max(0.1, min(1.0, avg_reward / 10.0)) * learned.demonstration_weight), 4)
                 self.learned_sequences[key] = learned
                 discovered.append(learned)
         if discovered:
@@ -97,7 +114,7 @@ class SequenceLearner:
             self.successful_suggestions += 1
 
     def get_top_sequences(self, limit: int = 12) -> List[Tuple[str, LearnedSequence]]:
-        return sorted(self.learned_sequences.items(), key=lambda kv: kv[1].avg_reward * max(0.05, kv[1].confidence), reverse=True)[:limit]
+        return sorted(self.learned_sequences.items(), key=lambda kv: kv[1].avg_reward * max(0.05, kv[1].confidence) * max(1.0, getattr(kv[1], "demonstration_weight", 1.0)), reverse=True)[:limit]
 
     def get_stats(self) -> Dict[str, Any]:
         total = len(self.learned_sequences)
@@ -108,6 +125,7 @@ class SequenceLearner:
             "suggestions_made": self.total_suggestions_made,
             "successful_suggestions": self.successful_suggestions,
             "top_sequences": [{"key": k, **asdict(v)} for k, v in self.get_top_sequences(8)],
+            "demonstration_sequences": sum(1 for v in self.learned_sequences.values() if any(str(k).startswith("manual") or "operator" in str(k) for k in (getattr(v, "source_counts", {}) or {}))),
         }
 
     def to_dict(self) -> Dict[str, Any]:

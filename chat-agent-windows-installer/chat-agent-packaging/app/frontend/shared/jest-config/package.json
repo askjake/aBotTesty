@@ -1,0 +1,56 @@
+{
+  "name": "@shared/jest-config",
+  "version": "0.1.0",
+  "private": true,
+  "main": "jest.config.ts",
+  "types": "./jest.config.ts",
+  "exports": {
+    "./base": {
+      "import": "./jest.configts",
+      "types": "./jest.config.ts"
+    },
+    "./setup": {
+      "import": "./jest.setup.ts",
+      "types": "./jest.setup.ts"
+    },
+    "./__mocks__/*": "./__mocks__/*"
+  },
+  "dependencies": {
+    "@ant-design/cssinjs": "^2.0.1",
+    "@ant-design/icons": "~6.1.0",
+    "@ant-design/x": "^2.1.3",
+    "@reduxjs/toolkit": "^2.11.2",
+    "@shared/ui": "workspace:*",
+    "@tanstack/react-virtual": "^3.13.13",
+    "antd": "^6.2.0",
+    "axios": "^1.13.2",
+    "export-from-json": "^1.7.4",
+    "nanoid": "^5.1.6",
+    "next": "^16.1.3",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-infinite-scroll-component": "^6.1.1",
+    "react-redux": "^9.2.0",
+    "styled-components": "^6.1.19",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@shared/eslint-config": "workspace:*",
+    "@shared/typescript-config": "workspace:*",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.1",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.0.2",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "axios-mock-adapter": "^2.1.0",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0",
+    "jest-styled-components": "^7.2.0",
+    "redux-mock-store": "^1.5.5",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3"
+  }
+}

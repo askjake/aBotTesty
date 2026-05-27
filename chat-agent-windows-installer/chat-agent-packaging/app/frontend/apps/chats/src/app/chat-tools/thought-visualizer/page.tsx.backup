@@ -1,0 +1,117 @@
+'use client';
+
+import { Card, Typography, Alert, Button } from 'antd';
+import { BulbOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useState, useEffect } from 'react';
+import ContainerWithSidebar from '@/components/containers/ContainerWithSidebar';
+
+const { Title, Text } = Typography;
+
+export default function ThoughtVisualizerPage() {
+  const [vizUrl, setVizUrl] = useState('');
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Get the API base URL from environment or construct from window.location
+    const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || 
+                   (typeof window !== 'undefined' ? window.location.origin : '');
+    
+    const fullVizUrl = `${apiBase}/rest/api/v1/viz`;
+    setVizUrl(fullVizUrl);
+    
+    // Test if the endpoint is accessible
+    fetch(fullVizUrl)
+      .then(response => {
+        if (response.ok) {
+          setIsLoading(false);
+          setError(null);
+        } else {
+          setError(`Visualization endpoint returned ${response.status}`);
+          setIsLoading(false);
+        }
+      })
+      .catch(err => {
+        setError(`Failed to connect to visualization endpoint: ${err.message}`);
+        setIsLoading(false);
+      });
+  }, []);
+
+  const handleReload = () => {
+    setIsLoading(true);
+    setError(null);
+    // Force iframe reload
+    const iframe = document.querySelector('iframe');
+    if (iframe) {
+      iframe.src = iframe.src;
+    }
+    setTimeout(() => setIsLoading(false), 1000);
+  };
+
+  return (
+    <ContainerWithSidebar>
+      <Card style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Title level={2} style={{ margin: 0 }}>
+            <BulbOutlined /> AI Thought Visualizer
+          </Title>
+          <Button 
+            icon={<ReloadOutlined />} 
+            onClick={handleReload}
+            loading={isLoading}
+          >
+            Reload
+          </Button>
+        </div>
+        
+        <Text type="secondary" style={{ marginTop: 8 }}>
+          Real-time visualization of AI reasoning and decision-making process
+        </Text>
+
+        <Alert
+          message="Live Visualization"
+          description="This shows the AI's thought process in real-time as it analyzes and responds to queries. Events are captured during chat interactions."
+          type="info"
+          showIcon
+          style={{ marginTop: 16, marginBottom: 16 }}
+        />
+
+        {error && (
+          <Alert
+            message="Connection Error"
+            description={error}
+            type="error"
+            showIcon
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
+        <div style={{ flex: 1, minHeight: 0, marginTop: 16 }}>
+          {vizUrl && !error && (
+            <iframe
+              src={vizUrl}
+              style={{
+                width: '100%',
+                height: '100%',
+                border: '1px solid #d9d9d9',
+                borderRadius: 8,
+              }}
+              title="AI Thought Visualization"
+              allow="fullscreen"
+            />
+          )}
+          {!vizUrl && !error && (
+            <div style={{ 
+              display: 'flex', 
+              justifyContent: 'center', 
+              alignItems: 'center', 
+              height: '100%' 
+            }}>
+              <Text type="secondary">Loading visualization...</Text>
+            </div>
+          )}
+        </div>
+      </Card>
+    </ContainerWithSidebar>
+  );
+}

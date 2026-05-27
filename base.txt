@@ -1,13 +1,16 @@
 {
-  "stbs": {
-    "found1": {
-      "protocol": "SGS",
-      "role": "hopper",
-      "remote": "sgs",
-      "ip": "192.168.0.145",
-      "stb": "R1886469480-82",
-      "receiver": "XAF7486e214f5de",
-      "cid": 1004
+    "stbs": {
+        "found1": {
+            "protocol": "SGS",
+            "role": "hopper",
+            "remote": "14",
+            "ip": "10.73.185.30",
+            "stb": "R1956409151-66",
+            "receiver": "",
+            "cid": 4,
+            "lname": "v0001_client_b2009b1e1e7681be9ec5fe84c8a5a95719738d9b",
+            "passwd": "744bb396ff3cdf509539f930a4e7a26e26fef8dd",
+            "prod": true
+        }
     }
-  }
 }

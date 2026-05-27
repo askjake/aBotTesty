@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import time
+import queue
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -33,11 +35,15 @@ os.environ.setdefault("JAMBOREE_BASE", str(ROOT / "base.txt"))
 from flask import Response, abort, jsonify, request, send_file  # noqa: E402
 
 from capture_monitor import CaptureMonitor  # noqa: E402
-from auto_crawler import AutonomousCrawler, CrawlerConfig  # noqa: E402
+import cv2  # noqa: E402
+from auto_crawler import AutonomousCrawler, CrawlerConfig, SimilarityModel  # noqa: E402
 from focus_detector import detect_focus, draw_focus_overlay  # noqa: E402
 from parental_control_agent import ParentalControlAgent  # noqa: E402
 from manual_teaching_recorder import ManualTeachingRecorder  # noqa: E402
 from dashboard_analytics import DashboardDataset  # noqa: E402
+from channel_surf_agent import ChannelSurfAgent  # noqa: E402
+from channel_metadata import extract_guide_grid  # noqa: E402
+from ppv_purchase_agent import PPVPurchaseAgent  # noqa: E402
 from human_playbooks import all_playbooks, playbooks_for_cues, backlog_from_graph  # noqa: E402
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
@@ -55,13 +61,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "capture_width": 1280,
     "capture_height": 720,
     "capture_fps": 30,
+    "capture_jpeg_every_n_frames": 2,
+    "video_stream_fps": 10,
     "signal_min_brightness": 8.0,
     "signal_min_variance": 25.0,
     "motion_threshold": 2.0,
     "snapshot_dir": "snapshots",
     "log_dir": "logs",
     "crawler_dir": "crawler_data",
-    "crawler_enabled_keys": ["up", "down", "left", "right", "guide", "back", "home", "info", "select"],
+    "crawler_enabled_keys": ["up", "down", "left", "right", "guide", "back", "home", "info", "select", "live", "recall", "input", "diamond", "ddiamond", "options", "dvr", "ch_up", "ch_down"],
     "crawler_max_steps": 250,
     "crawler_max_states": 80,
     "crawler_max_depth": 7,
@@ -79,13 +87,42 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "crawler_max_adaptive_observe_s": 1.8,
     "crawler_timing_outlier_clip_s": 4.0,
     "crawler_route_replay_gap_s": 0.075,
-    "crawler_deep_ocr_every_n_steps": 6,
+    "crawler_deep_ocr_every_n_steps": 10,
+    "crawler_timing_poll_s": 0.28,
+    "crawler_ui_friendly_mode": True,
+    "crawler_compact_json_saves": True,
+    "crawler_hot_loop_save_every_n_actions": 6,
+    "crawler_hot_loop_save_min_interval_s": 8.0,
+    "crawler_sequence_mining_every_n_steps": 24,
+    "crawler_graph_match_candidate_limit": 240,
+    "crawler_video_black_screen_recovery_enabled": True,
+    "crawler_video_black_screen_recovery_sequence": ["ch_up", "ch_down", "live"],
+    "crawler_video_black_screen_recovery_wait_s": 1.6,
+    "crawler_video_black_screen_max_recoveries": 3,
+    "crawler_sysdiag_bootstrap_enabled": False,
+    "crawler_sysdiag_bootstrap_key": "sys info",
+    "crawler_sysdiag_bootstrap_settle_s": 3.0,
+    "crawler_sysdiag_bootstrap_live_key": "live",
+    "crawler_sysdiag_bootstrap_live_settle_s": 2.0,
     "teacher_fast_recording_enabled": True,
     "teacher_burst_idle_s": 0.75,
+    "monitor_auto_learning_enabled": True,
+    "monitor_auto_learning_interrupts_crawler": True,
+    "monitor_auto_learning_gap_s": 0.075,
+    "monitor_auto_learning_note": "operator command from /monitor or public remote endpoint",
+    "monitor_auto_learning_async": True,
+    "monitor_auto_learning_async_settle_s": 0.85,
+    "monitor_auto_learning_queue_max": 200,
+    "ppv_purchase_test_enabled": False,
+    "ppv_purchase_arm_ttl_s": 300,
     "crawler_channel_learning_enabled": False,
+    "crawler_guide_grid_learning_enabled": True,
+    "crawler_guide_grid_min_confidence": 0.35,
     "crawler_channel_scan_list": [200, 205, 206, 207, 208, 209, 210, 220, 230],
     "crawler_channel_digit_gap_s": 0.075,
     "crawler_channel_tune_settle_s": 2.2,
+    "channel_surf_default_channels": [100, 101, 102, 103, 104, 105, 200, 205, 206, 207, 208, 209, 210],
+    "channel_surf_max_channels": 25,
     "crawler_continuous_exploration_enabled": True,
     "crawler_continuous_idle_s": 2.0,
     "crawler_max_cycles": 0,
@@ -119,7 +156,11 @@ CFG = load_config()
 if os.getenv("MERGED_SERVER_PORT"):
     CFG["server_port"] = int(os.getenv("MERGED_SERVER_PORT", CFG["server_port"]))
 if os.getenv("MERGED_CAPTURE_DEVICE"):
-    CFG["capture_device"] = int(os.getenv("MERGED_CAPTURE_DEVICE", CFG["capture_device"]))
+    _dev = os.getenv("MERGED_CAPTURE_DEVICE", str(CFG["capture_device"]))
+    try:
+        CFG["capture_device"] = int(_dev) if not _dev.startswith(("rtsp://", "rtmp://", "http://", "https://")) else _dev
+    except ValueError:
+        CFG["capture_device"] = _dev
 SNAPSHOT_DIR = (ROOT / str(CFG["snapshot_dir"])).resolve()
 LOG_DIR = (ROOT / str(CFG["log_dir"])).resolve()
 CRAWLER_DIR = (ROOT / str(CFG["crawler_dir"])).resolve()
@@ -141,9 +182,13 @@ monitor = CaptureMonitor(
     width=int(CFG["capture_width"]),
     height=int(CFG["capture_height"]),
     fps=int(CFG["capture_fps"]),
+    jpeg_every_n_frames=int(CFG.get("capture_jpeg_every_n_frames", 2)),
     signal_min_brightness=float(CFG["signal_min_brightness"]),
     signal_min_variance=float(CFG["signal_min_variance"]),
     motion_threshold=float(CFG["motion_threshold"]),
+    rtsp_reconnect_delay=2.0,
+    rtsp_tcp_transport=True,
+    source_label="Configured input",
 )
 
 # Start monitoring immediately; /monitor/stop can pause it.
@@ -229,6 +274,17 @@ def key_sequence_for(key: str, channel_suffix_key: str = "select") -> List[str]:
             break
     if channel is None and upper.startswith("CH") and upper[2:].isdigit():
         channel = upper[2:]
+    # v34 self-correction: /send_key with raw multi-digit channel text
+    # (for example key=250 from a guide-selected channel) must be treated like
+    # human digit entry, not a nonexistent SGS button named "250". Single digits
+    # still remain normal digit buttons for the keypad.
+    if channel is None and raw.isdigit() and 2 <= len(raw) <= 4:
+        try:
+            n = int(raw)
+            if 2 <= n <= 9999:
+                channel = raw
+        except Exception:
+            channel = None
     if channel:
         suffix = normalize_button(channel_suffix_key) if channel_suffix_key else ""
         return [*channel, *([suffix] if suffix else [])]
@@ -307,11 +363,29 @@ crawler = AutonomousCrawler(
         max_adaptive_observe_s=float(CFG.get("crawler_max_adaptive_observe_s", 1.8)),
         timing_outlier_clip_s=float(CFG.get("crawler_timing_outlier_clip_s", 4.0)),
         route_replay_gap_s=float(CFG.get("crawler_route_replay_gap_s", 0.075)),
-        deep_ocr_every_n_steps=int(CFG.get("crawler_deep_ocr_every_n_steps", 6)),
+        deep_ocr_every_n_steps=int(CFG.get("crawler_deep_ocr_every_n_steps", 10)),
+        timing_poll_s=float(CFG.get("crawler_timing_poll_s", 0.28)),
+        ui_friendly_mode=bool(CFG.get("crawler_ui_friendly_mode", True)),
+        compact_json_saves=bool(CFG.get("crawler_compact_json_saves", True)),
+        hot_loop_save_every_n_actions=int(CFG.get("crawler_hot_loop_save_every_n_actions", 6)),
+        hot_loop_save_min_interval_s=float(CFG.get("crawler_hot_loop_save_min_interval_s", 8.0)),
+        sequence_mining_every_n_steps=int(CFG.get("crawler_sequence_mining_every_n_steps", 24)),
+        graph_match_candidate_limit=int(CFG.get("crawler_graph_match_candidate_limit", 240)),
+        video_black_screen_recovery_enabled=bool(CFG.get("crawler_video_black_screen_recovery_enabled", True)),
+        video_black_screen_recovery_sequence=list(CFG.get("crawler_video_black_screen_recovery_sequence", ["ch_up", "ch_down", "live"])),
+        video_black_screen_recovery_wait_s=float(CFG.get("crawler_video_black_screen_recovery_wait_s", 1.6)),
+        video_black_screen_max_recoveries=int(CFG.get("crawler_video_black_screen_max_recoveries", 3)),
+        sysdiag_bootstrap_enabled=bool(CFG.get("crawler_sysdiag_bootstrap_enabled", False)),
+        sysdiag_bootstrap_key=str(CFG.get("crawler_sysdiag_bootstrap_key", "sys info")),
+        sysdiag_bootstrap_settle_s=float(CFG.get("crawler_sysdiag_bootstrap_settle_s", 3.0)),
+        sysdiag_bootstrap_live_key=str(CFG.get("crawler_sysdiag_bootstrap_live_key", "live")),
+        sysdiag_bootstrap_live_settle_s=float(CFG.get("crawler_sysdiag_bootstrap_live_settle_s", 2.0)),
         channel_learning_enabled=bool(CFG.get("crawler_channel_learning_enabled", False)),
         channel_scan_list=list(CFG.get("crawler_channel_scan_list", [])),
         channel_digit_gap_s=float(CFG.get("crawler_channel_digit_gap_s", 0.075)),
         channel_tune_settle_s=float(CFG.get("crawler_channel_tune_settle_s", 2.2)),
+        guide_grid_learning_enabled=bool(CFG.get("crawler_guide_grid_learning_enabled", True)),
+        guide_grid_min_confidence=float(CFG.get("crawler_guide_grid_min_confidence", 0.35)),
         continuous_exploration_enabled=bool(CFG.get("crawler_continuous_exploration_enabled", True)),
         continuous_idle_s=float(CFG.get("crawler_continuous_idle_s", 2.0)),
         max_cycles=int(CFG.get("crawler_max_cycles", 0)),
@@ -342,6 +416,208 @@ teacher = ManualTeachingRecorder(
 )
 teacher.fast_recording_enabled = bool(CFG.get("teacher_fast_recording_enabled", True))
 teacher.burst_idle_s = float(CFG.get("teacher_burst_idle_s", 0.75))
+
+channel_surf = ChannelSurfAgent(
+    data_dir=CRAWLER_DIR,
+    capture_frame=monitor.get_frame,
+    capture_status=monitor.get_status,
+    send_key=crawler_send_key,
+    default_delay_s=float(CFG.get("crawler_channel_digit_gap_s", 0.075)),
+)
+
+ppv_agent = PPVPurchaseAgent(
+    data_dir=CRAWLER_DIR,
+    crawler=crawler,
+    capture_frame=monitor.get_frame,
+    send_requested_key=send_requested_key_direct,
+    default_gap_s=float(CFG.get("monitor_auto_learning_gap_s", 0.075)),
+    default_delay_ms=int(CFG.get("default_delay_ms", 120)),
+)
+
+
+def _monitor_learning_enabled() -> bool:
+    return bool(CFG.get("monitor_auto_learning_enabled", True))
+
+
+_OPERATOR_LEARNING_QUEUE: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=int(CFG.get("monitor_auto_learning_queue_max", 200) or 200))
+_OPERATOR_LEARNING_STATS: Dict[str, Any] = {
+    "queued": 0,
+    "learned": 0,
+    "dropped": 0,
+    "errors": 0,
+    "last_error": "",
+    "last_learned": None,
+}
+
+
+def _learn_operator_transition_item(item: Dict[str, Any]) -> None:
+    """Background monitor-learning worker.
+
+    v29 fix: /monitor and /send_key must never block behind OCR, large-graph
+    matching, or JSON saves.  The request path captures a cheap before-frame copy,
+    sends the remote command immediately, then this worker performs the same
+    before→button→after learning asynchronously.
+    """
+    try:
+        settle_s = float(item.get("settle_s") or CFG.get("monitor_auto_learning_async_settle_s", 0.85))
+        time.sleep(max(0.05, settle_s))
+        before_frame = item.get("before_frame")
+        after_frame = monitor.get_frame()
+        if before_frame is None or after_frame is None:
+            raise RuntimeError("operator learning skipped: before/after capture frame unavailable")
+        key = str(item.get("key") or "")
+        t0 = float(item.get("t0") or time.time())
+        before_fp = crawler.extractor.extract(before_frame, hint_id=f"operator_before_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
+        after_fp = crawler.extractor.extract(after_frame, hint_id=f"operator_after_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}")
+        cfg = crawler.config
+        before_id, _, _ = crawler.graph.upsert_state(before_fp, cfg.state_similarity_threshold)
+        after_id, created, cmp_to_known = crawler.graph.upsert_state(after_fp, cfg.state_similarity_threshold)
+        cmp_before_after = SimilarityModel.compare(before_fp, after_fp)
+        changed = cmp_before_after["score"] < cfg.changed_similarity_threshold or after_id != before_id
+        confidence = max(0.72, 1.0 - cmp_before_after["score"]) if changed else max(0.30, cmp_before_after["score"])
+        if after_id != before_id:
+            confidence = max(confidence, float(cmp_to_known.get("score", 0.5)))
+        confidence = max(0.05, min(1.0, float(confidence)))
+        reward, reward_details = crawler.brain.score_observation(cfg, key, before_fp, after_fp, created=created, changed=changed)
+        # Human/operator paths represent likely customer traversals, so they are
+        # stronger training data than random autonomous exploration.
+        reward += 14.0
+        reward_details["operator_customer_path_weight"] = 14.0
+        edge_key = crawler.graph.edge_key(before_id, key, after_id)
+        edge_existed = edge_key in crawler.graph.edges
+        if changed and not edge_existed:
+            reward += cfg.reward_new_edge
+            reward_details["new_edge_reward"] = cfg.reward_new_edge
+        sample = {
+            "source": "operator_monitor_async",
+            "operator_auto": True,
+            "before_state": before_id,
+            "after_state": after_id,
+            "button": key,
+            "button_sequence": crawler._action_sequence_for_display(key),
+            "before": {**crawler._state_summary(before_id), "screenshot": before_fp.screenshot, "ocr_text": before_fp.ocr_text, "focus": before_fp.focus, "focus_label": crawler.focus_label(before_fp)},
+            "after": {**crawler._state_summary(after_id), "screenshot": after_fp.screenshot, "ocr_text": after_fp.ocr_text, "focus": after_fp.focus, "focus_label": crawler.focus_label(after_fp)},
+            "before_after_similarity": cmp_before_after,
+            "known_similarity": cmp_to_known,
+            "send": item.get("send_result") or {},
+            "created_state": created,
+            "changed": changed,
+            "reward": round(float(reward), 4),
+            "reward_details": reward_details,
+            "timing": {"mode": "operator_async_checkpoint", "response_s": round(time.time() - t0, 3), "request_returned_immediately": True},
+            "edge_existed": edge_existed,
+            "note": str(item.get("note") or ""),
+        }
+        edge = crawler.graph.record_edge(before_id, key, after_id, changed=changed, success=True, confidence=confidence, sample=sample)
+        crawler.brain.update_state_action(before_id, key, after_id, reward, True, not changed, bool(created or not edge_existed))
+        crawler.brain.update_reward(key, 8.0)
+        # If this human/operator action touched On Demand / PPV surfaces, also
+        # record it as a purchase-flow stage transition.  This lets the PPV lab
+        # learn from ordinary /monitor usage, including channel-1 OnDemand entry
+        # and free/paid purchase sequences, without making the button press wait
+        # for the PPV analyzer.
+        try:
+            if "ppv_agent" in globals():
+                ppv_agent.record_operator_observation(key, before_fp, after_fp, source="operator_monitor_async")
+        except Exception:
+            log.debug("operator PPV/OnDemand observation skipped", exc_info=True)
+
+        try:
+            crawler.mark_learning_dirty()
+            crawler.maybe_save_hot_loop(force=False)
+        except Exception:
+            # Worst case, the next crawler/stop checkpoint will save.
+            pass
+        _OPERATOR_LEARNING_STATS["learned"] += 1
+        _OPERATOR_LEARNING_STATS["last_learned"] = {
+            "button": key,
+            "before_state": before_id,
+            "after_state": after_id,
+            "changed": changed,
+            "confidence": round(float(edge.confidence), 4),
+            "reward": round(float(reward), 4),
+        }
+        log.info("operator async monitor transition learned %s", _OPERATOR_LEARNING_STATS["last_learned"])
+    except Exception as exc:
+        _OPERATOR_LEARNING_STATS["errors"] += 1
+        _OPERATOR_LEARNING_STATS["last_error"] = str(exc)
+        log.exception("operator async monitor learning failed")
+
+
+def _operator_learning_worker() -> None:
+    while True:
+        item = _OPERATOR_LEARNING_QUEUE.get()
+        try:
+            _learn_operator_transition_item(item)
+        finally:
+            _OPERATOR_LEARNING_QUEUE.task_done()
+
+
+_OPERATOR_WORKER_THREAD = threading.Thread(target=_operator_learning_worker, name="OperatorMonitorLearning", daemon=True)
+_OPERATOR_WORKER_THREAD.start()
+
+
+def _enqueue_operator_learning(item: Dict[str, Any]) -> bool:
+    try:
+        _OPERATOR_LEARNING_QUEUE.put_nowait(item)
+        _OPERATOR_LEARNING_STATS["queued"] += 1
+        return True
+    except queue.Full:
+        _OPERATOR_LEARNING_STATS["dropped"] += 1
+        _OPERATOR_LEARNING_STATS["last_error"] = "operator learning queue full"
+        return False
+
+
+def _record_or_send_operator_key(key: str, delay_ms: int | None = None, gap_s: float | None = None, learn_mode: str | None = None, note: str = "") -> Dict[str, Any]:
+    """Send a human/operator requested key and optionally learn it.
+
+    v29 behavior: monitor buttons stay responsive.  Learning is queued after a
+    cheap before-frame snapshot; expensive OCR/graph matching/saves happen on a
+    background worker.  If a formal Teacher Mode session is active, keep the old
+    explicit teacher semantics.
+    """
+    gap = float(gap_s if gap_s is not None else CFG.get("monitor_auto_learning_gap_s", 0.075))
+    mode = str(learn_mode or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
+    existing_manual_session = bool(teacher.active)
+    if existing_manual_session:
+        return teacher.record_button_fast(str(key), delay_ms=delay_ms, gap_s=gap, note=note or "manual teaching", operator_auto=False, source="manual_teaching_fast")
+    interrupted = False
+    if _monitor_learning_enabled():
+        try:
+            if bool(CFG.get("monitor_auto_learning_interrupts_crawler", True)) and crawler.status().get("running"):
+                crawler.stop()
+                interrupted = True
+        except Exception:
+            interrupted = False
+        before_frame = monitor.get_frame()
+        send_result = send_requested_key_direct(str(key), delay_ms=delay_ms, gap_s=gap)
+        queued = False
+        if bool(CFG.get("monitor_auto_learning_async", True)):
+            queued = _enqueue_operator_learning({
+                "key": str(key),
+                "before_frame": before_frame,
+                "send_result": send_result,
+                "t0": time.time(),
+                "note": note or str(CFG.get("monitor_auto_learning_note", "operator command")),
+                "settle_s": float(CFG.get("monitor_auto_learning_async_settle_s", 0.85)),
+                "interrupted_crawler": interrupted,
+            })
+            send_result.update({
+                "auto_monitor_learning": True,
+                "learning_async": True,
+                "learning_queued": queued,
+                "interrupted_crawler": interrupted,
+                "operator_learning_queue_depth": _OPERATOR_LEARNING_QUEUE.qsize(),
+            })
+            return send_result
+        # Escape hatch: old blocking behavior, only when explicitly disabled.
+        teacher.start(name="Auto-learned monitor operation", notes="Implicit blocking session", operator="monitor_auto")
+        result = teacher.record_button_fast(str(key), delay_ms=delay_ms, gap_s=gap, note=note, operator_auto=True, source="operator_monitor_auto")
+        result["auto_monitor_learning"] = True
+        result["interrupted_crawler"] = interrupted
+        result["learn_mode"] = mode
+        return result
+    return send_requested_key_direct(str(key), delay_ms=delay_ms, gap_s=gap)
 
 def placeholder_jpeg(message: str = "No active frame") -> bytes:
     from PIL import Image, ImageDraw
@@ -417,7 +693,7 @@ def monitor_page() -> Response:
       <button onclick="sendKey('back')">Back</button><button onclick="sendKey('0')">0</button><button onclick="sendKey('select')">Enter</button>
     </div>
     <p>
-      <input id="direct" placeholder="CH_206 or guide" style="width:190px;padding:10px;border-radius:8px;border:1px solid #444;background:#0f1113;color:white;">
+      <input id="direct" placeholder="250, CH_206, or guide" style="width:190px;padding:10px;border-radius:8px;border:1px solid #444;background:#0f1113;color:white;">
       <button onclick="sendDirect()">Send</button>
     </p>
     <p>
@@ -426,7 +702,18 @@ def monitor_page() -> Response:
       <button class="secondary" onclick="fetch('/api/snapshot/save',{{method:'POST'}}).then(r=>r.json()).then(j=>alert(JSON.stringify(j,null,2)))">Save Snapshot</button>
       <button class="secondary" onclick="window.location='/crawl'">Autonomous Crawl</button>
       <button class="secondary" onclick="window.location='/teach'">Teacher Mode</button>
+      <button class="secondary" onclick="window.location='/channel_surf'">Channel Surf</button>
+      <button class="secondary" onclick="window.location='/ppv'">PPV Lab</button>
+      <button class="secondary" onclick="window.location='/dashboards'">Dashboards</button>
     </p>
+    <div class="card" style="padding:10px;margin:10px 0;background:#10171d">
+      <h3 style="margin-top:0">Guide Intelligence</h3>
+      <input id="program_query" placeholder="program title or channel" style="width:190px;padding:8px;border-radius:8px;border:1px solid #444;background:#0f1113;color:white;">
+      <button class="secondary" onclick="analyzeGuide()">Analyze Guide</button>
+      <button onclick="selectGuideProgram(true)">Plan Select</button>
+      <button class="warn" onclick="selectGuideProgram(false)">Select Match</button>
+      <pre id="guide_out">guide grid ready…</pre>
+    </div>
     <div class="card" style="padding:10px;margin:10px 0;background:#11161b">
       <h3 style="margin-top:0">Teacher Recording</h3>
       <input id="teach_name" placeholder="feature/test name" style="width:190px;padding:8px;border-radius:8px;border:1px solid #444;background:#0f1113;color:white;">
@@ -486,6 +773,7 @@ def api_status():
         video=monitor.get_status(),
         crawler={k: v for k, v in crawler.status().items() if k != "recent_events"},
         teacher={k: v for k, v in teacher.status().items() if k != "active_session"},
+        channel_surf=channel_surf.status(),
     )
 
 
@@ -530,7 +818,7 @@ def video_mjpg():
         while True:
             jpg = monitor.get_jpeg() or placeholder_jpeg("Waiting for capture card frame")
             yield b"--frame\r\nContent-Type: image/jpeg\r\nCache-Control: no-cache\r\n\r\n" + jpg + b"\r\n"
-            time.sleep(1.0 / 15.0)
+            time.sleep(1.0 / max(1.0, float(CFG.get("video_stream_fps", 10))))
 
     return Response(stream(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
@@ -544,16 +832,13 @@ def compat_send_key():
     if not key:
         return jsonify(ok=False, error="key is required"), 400
     try:
-        if teacher.active:
-            learn_mode = str(data.get("learn_mode") or request.args.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
-            if learn_mode in {"sync", "deep", "blocking"}:
-                result = teacher.record_button(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
-            else:
-                result = teacher.record_button_fast(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
-            result["sent_via_teacher"] = True
-            result["learn_mode"] = learn_mode
-            return jsonify(result)
-        result = send_requested_key_direct(str(key), delay_ms=int(delay_ms), gap_s=gap_s)
+        result = _record_or_send_operator_key(
+            str(key),
+            delay_ms=int(delay_ms),
+            gap_s=gap_s,
+            learn_mode=str(data.get("learn_mode") or request.args.get("learn_mode") or ""),
+            note=str(data.get("note") or "operator command via /send_key"),
+        )
         return jsonify(result)
     except Exception as exc:
         log.exception("send_key failed")
@@ -564,16 +849,13 @@ def compat_send_key():
 def send_key_path(key: str):
     delay_ms = int(request.args.get("delay_ms", CFG["default_delay_ms"]))
     try:
-        if teacher.active:
-            learn_mode = str(request.args.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
-            if learn_mode in {"sync", "deep", "blocking"}:
-                result = teacher.record_button(str(key), delay_ms=delay_ms, gap_s=0.2)
-            else:
-                result = teacher.record_button_fast(str(key), delay_ms=delay_ms, gap_s=float(request.args.get("gap_s", 0.075)))
-            result["sent_via_teacher"] = True
-            result["learn_mode"] = learn_mode
-            return jsonify(result)
-        result = send_requested_key_direct(str(key), delay_ms=delay_ms, gap_s=0.2)
+        result = _record_or_send_operator_key(
+            str(key),
+            delay_ms=delay_ms,
+            gap_s=float(request.args.get("gap_s", CFG.get("monitor_auto_learning_gap_s", 0.075))),
+            learn_mode=str(request.args.get("learn_mode") or ""),
+            note="operator command via /key route",
+        )
         return jsonify(result)
     except Exception as exc:
         log.exception("key path failed")
@@ -590,15 +872,13 @@ def api_tune():
         ch = int(channel)
         gap_s = float(data.get("gap_s", CFG.get("crawler_channel_digit_gap_s", 0.075)))
         requested = f"CH_{ch}"
-        if teacher.active:
-            learn_mode = str(data.get("learn_mode") or ("fast" if teacher.fast_recording_enabled else "sync")).lower()
-            if learn_mode in {"sync", "deep", "blocking"}:
-                result = teacher.record_button(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
-            else:
-                result = teacher.record_button_fast(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
-            result.update(channel=ch, sent_via_teacher=True, learn_mode=learn_mode)
-            return jsonify(result)
-        result = send_requested_key_direct(requested, delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=gap_s)
+        result = _record_or_send_operator_key(
+            requested,
+            delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])),
+            gap_s=gap_s,
+            learn_mode=str(data.get("learn_mode") or ""),
+            note=f"operator direct-tuned channel {ch} via /api/tune",
+        )
         result.update(channel=ch, gap_s=gap_s)
         return jsonify(result)
     except Exception as exc:
@@ -711,8 +991,8 @@ def crawler_page() -> Response:
 </head>
 <body>
 <header>
-  <h1>STB Intelligence Console <span class="hint">v9 · semantic focus/context + title-aware learning map</span></h1>
-  <div><span id="runpill" class="pill inactive">idle</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/parental" style="color:#93c5fd">parental lab</a> · <a href="/api/crawl/export" style="color:#93c5fd">export graph</a></div>
+  <h1>STB Intelligence Console <span class="hint">v33 · UI-friendly sliced map + async transition loading</span></h1>
+  <div><span id="runpill" class="pill inactive">idle</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/parental" style="color:#93c5fd">parental lab</a> · <a href="/channel_surf" style="color:#93c5fd">channel surf</a> · <a href="/ppv" style="color:#93c5fd">ppv lab</a> · <a href="/api/crawl/export" style="color:#93c5fd">export graph</a></div>
 </header>
 <main>
 <section class="stack">
@@ -837,10 +1117,40 @@ function renderTransitions(items){let html=''; (items||[]).forEach(t=>{const r=t
 function renderFrontier(nodes){const arr=[...(nodes||[])].sort((a,b)=>(b.remaining_count-a.remaining_count)||((b.frontier_score||0)-(a.frontier_score||0))).slice(0,30); let html=''; arr.forEach(n=>{html+=`<div class="transitionCard"><div style="display:flex;gap:10px"><div class="screenMini" style="width:180px">${n.image_url?`<img src="${esc(n.image_url)}">`:''}<div>${esc(short(n.label,50))}</div></div><div><b>${esc(n.kind)}</b><br><span class="focusPill">focus: ${esc(short(n.focus_label||'unknown',48))}</span><br>remaining: ${(n.remaining_actions||[]).map(esc).join(', ')}<br>confidence ${(n.confidence||0).toFixed(2)} · observations ${n.observations}<br><button onclick="selectNode('${esc(n.id)}');navigateTarget()">Test navigate</button></div></div></div>`}); qs('frontierList').innerHTML=html || '<div class="hint">No frontier left under current limits.</div>';}
 function focusHtml(f){if(!f)return '<div class="focusBox">No focus/context data yet.</div>'; const ui=f.ui_context||{}; const title=f.screen_title||ui.screen_title||''; const item=f.focused_item||ui.focused_item||f.label_text||f.focus_text||''; const value=f.focused_value||ui.focused_value||''; const role=f.focus_role||ui.focus_role||''; const pairs=f.setting_pairs||ui.setting_pairs||[]; const risks=f.risk_flags||ui.risk_flags||[]; const tags=f.semantic_tags||ui.semantic_tags||[]; if(!f.found&&!title)return '<div class="focusBox">Focus not detected yet.</div>'; return `<div class="focusBox"><b>${esc(short(title||'Focused region',90))}</b><br>item: ${esc(short(item||'',120))}${value?' = '+esc(short(value,50)):''}<br>role: ${esc(role||'')} · focus conf ${Number(f.confidence||0).toFixed(2)} · context conf ${Number(f.context_confidence||ui.context_confidence||0).toFixed(2)}<br>row: ${esc(short(f.row_text||ui.row_text||'',220))}<br>pairs: ${esc(short((pairs||[]).map(p=>(p.label||'')+'='+ (p.value||'')).join(' · '),180))}<br>tags: ${esc((tags||[]).join(', '))}${risks.length?' · risks: '+esc(risks.join(', ')):''}</div>`;}
 function selectNode(id){selectedNode=(MAP.nodes||[]).find(n=>n.id===id); qs('target_state').value=id; if(selectedNode){qs('selected_img').src=selectedNode.image_url||''; qs('selected_text').innerHTML=`<b>${esc(selectedNode.label||id)}</b><br>${esc(selectedNode.kind)} · title ${esc(selectedNode.screen_title||'')} · confidence ${(selectedNode.confidence||0).toFixed(3)} · remaining ${(selectedNode.remaining_actions||[]).join(', ')}<br>${focusHtml(selectedNode.focus)}<br><b>OCR</b><br>${esc(short(selectedNode.ocr_text||'',700))}`;} renderMap(MAP);}
-function setView(v){view=v; qs('flowView').className=v==='flow'?'mapWrap':'hidden'; qs('transitionView').className=v==='transitions'?'':'hidden'; qs('frontierView').className=v==='frontier'?'':'hidden';}
+function setView(v){view=v; qs('flowView').className=v==='flow'?'mapWrap':'hidden'; qs('transitionView').className=v==='transitions'?'':'hidden'; qs('frontierView').className=v==='frontier'?'':'hidden'; if(v==='transitions') loadTransitions();}
 function zoom(f){scale=Math.max(.35,Math.min(2.2,scale*f)); renderMap(MAP)} function fitTop(){qs('flowView').scrollTo({left:0,top:0,behavior:'smooth'});}
-async function loadStatus(){const j=await api('/api/crawl/status'); const cont=j.config&&j.config.continuous_exploration_enabled; qs('runpill').textContent=j.running?(cont?'continuous ':'running ')+j.steps+' steps':'idle'+(j.last_stop_reason?' · '+j.last_stop_reason:''); qs('runpill').className='pill '+(j.running?'active':'inactive'); qs('status').textContent=JSON.stringify(j,null,2); qs('events').textContent=JSON.stringify(j.recent_events||[],null,2); const learning=j.learning||{}; qs('brain_notes').textContent=JSON.stringify({stop_reason:j.last_stop_reason,last_error:j.last_error,coverage:learning.coverage, known_concepts:learning.known_concepts, known_titles:learning.known_menu_titles, known_focus_items:(learning.known_focus_items||[]).slice(0,20), known_setting_pairs:(learning.known_setting_pairs||[]).slice(0,20), known_token_count:learning.known_token_count, graph_file:j.graph_file, brain_file:j.brain_file},null,2);}
-async function loadMap(){const j=await api('/api/crawl/map'); renderMap(j);} 
+let statusInFlight=false, mapInFlight=false, transitionsInFlight=false, lastMapAt=0;
+async function loadStatus(){
+  if(statusInFlight) return;
+  statusInFlight=true;
+  try{
+    const j=await api('/api/crawl/status'); const cont=j.config&&j.config.continuous_exploration_enabled; qs('runpill').textContent=j.running?(cont?'continuous ':'running ')+j.steps+' steps':'idle'+(j.last_stop_reason?' · '+j.last_stop_reason:''); qs('runpill').className='pill '+(j.running?'active':'inactive'); qs('status').textContent=JSON.stringify(j,null,2); qs('events').textContent=JSON.stringify(j.recent_events||[],null,2); const learning=j.learning||{}; qs('brain_notes').textContent=JSON.stringify({stop_reason:j.last_stop_reason,last_error:j.last_error,coverage:learning.coverage, known_concepts:learning.known_concepts, known_titles:learning.known_menu_titles, known_focus_items:(learning.known_focus_items||[]).slice(0,20), known_setting_pairs:(learning.known_setting_pairs||[]).slice(0,20), known_token_count:learning.known_token_count, graph_file:j.graph_file, brain_file:j.brain_file, performance:j.performance, demonstrations:j.demonstrations},null,2);
+  } finally { statusInFlight=false; }
+}
+async function loadMap(force=false){
+  if(mapInFlight) return;
+  if(document.hidden && !force) return;
+  const now=Date.now();
+  if(!force && now-lastMapAt<9000) return;
+  mapInFlight=true;
+  try{
+    const j=await api('/api/crawl/map?max_nodes=240&max_edges=420&transitions=0');
+    lastMapAt=Date.now();
+    renderMap(j);
+    const slice=j.map_slice||{};
+    const note=slice.truncated?`Showing ${slice.selected_nodes}/${slice.total_nodes} states for UI performance. Use search/route for hidden states.`:'';
+    if(note){ qs('brain_notes').textContent = (qs('brain_notes').textContent||'') + '\n' + note; }
+  } finally { mapInFlight=false; }
+}
+async function loadTransitions(){
+  if(transitionsInFlight) return;
+  transitionsInFlight=true;
+  try{
+    const j=await api('/api/crawl/transitions?limit=180');
+    MAP.transitions=j.transitions||[];
+    renderTransitions();
+  } finally { transitionsInFlight=false; }
+}
 function renderConfidence(rows){let arr=Object.values(rows); if(!arr.length){qs('confidence_table').innerHTML='<span class="hint">No transitions learned yet.</span>';return;} let html='<table><tr><th>button</th><th>conf</th><th>attempts</th><th>noop</th><th>avg s</th><th>reward</th></tr>'; arr.slice(0,26).forEach(r=>html+=`<tr><td>${esc(r.action)}</td><td>${r.confidence}</td><td>${r.attempts}</td><td>${r.noops}</td><td>${r.avg_response_s??''}</td><td>${r.avg_reward??''}</td></tr>`); qs('confidence_table').innerHTML=html+'</table>';}
 function renderChannels(rows){let arr=Object.values(rows); if(!arr.length){qs('channels_table').innerHTML='<span class="hint">No channels learned yet.</span>';return;} let html='<table><tr><th>ch</th><th>name guess</th><th>symbols</th><th>conf</th><th>go</th></tr>'; arr.forEach(r=>html+=`<tr><td>${r.channel}</td><td>${esc(r.name_guess||'')}</td><td>${esc((r.symbols||[]).join(','))}</td><td>${r.confidence}</td><td><button onclick="tuneChannel(${r.channel})">Tune</button></td></tr>`); qs('channels_table').innerHTML=html+'</table>';}
 async function planRoute(){const body={target_state:qs('target_state').value.trim()||undefined, query:qs('target_query').value.trim()||undefined}; const ch=parseInt(qs('target_channel').value.trim()); if(!Number.isNaN(ch)) body.channel=ch; qs('route_result').textContent=JSON.stringify(await api('/api/crawl/plan',body),null,2);}
@@ -849,14 +1159,103 @@ async function tuneChannel(ch){let channel=ch||parseInt(qs('target_channel').val
 async function goalDryRun(){const body={query:qs('goal_query').value, desired_value:qs('goal_value').value, final_sequence:seqVal('goal_sequence'), dry_run:true}; qs('route_result').textContent=JSON.stringify(await api('/api/crawl/goal',body),null,2);}
 async function goalExecute(){const body={query:qs('goal_query').value, desired_value:qs('goal_value').value, final_sequence:seqVal('goal_sequence'), dry_run:false}; qs('route_result').textContent=JSON.stringify(await api('/api/crawl/goal',body),null,2); setTimeout(refreshAll,1000)}
 function showTab(name){['conf','channels','events','json'].forEach(t=>{qs('panel_'+t).className=t===name?'':'hidden'; qs('tab_'+t).className='tab '+(t===name?'on':'');});}
-async function refreshAll(){await loadStatus(); await loadMap();}
-setInterval(loadStatus,1500); setInterval(loadMap,7000); refreshAll();
+async function refreshAll(){await loadStatus(); await loadMap(true);}
+setInterval(loadStatus,2500); setInterval(()=>loadMap(false),12000);
+document.addEventListener('visibilitychange',()=>{ if(!document.hidden) refreshAll(); });
+refreshAll();
 </script>
 </body>
 </html>
 """,
         mimetype="text/html",
     )
+
+
+def _score_guide_program_match(program: Dict[str, Any], query: str = "", channel: Any = None) -> float:
+    q = " ".join(str(query or "").lower().split())
+    ch = str(channel or "").strip()
+    score = 0.0
+    title = str(program.get("title") or program.get("raw_text") or "").lower()
+    pch = str(program.get("channel_number") or "").strip()
+    pcode = str(program.get("channel_code") or "").lower()
+    if ch and pch == ch:
+        score += 2.0
+    if q:
+        if q in title:
+            score += 3.0 + len(q) / max(10.0, len(title) or 10.0)
+        else:
+            q_tokens = {x for x in q.split() if len(x) >= 2}
+            t_tokens = set(title.split()) | set(pcode.split())
+            if q_tokens:
+                score += len(q_tokens & t_tokens) / len(q_tokens)
+    elif ch and pch == ch:
+        score += 1.0
+    if program.get("selected"):
+        score += 0.25
+    return round(score, 5)
+
+
+def _best_current_guide_match(guide: Dict[str, Any], query: str = "", channel: Any = None) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+    for row in guide.get("rows") or []:
+        for p in row.get("programs") or []:
+            item = dict(p)
+            item.setdefault("channel_number", row.get("channel_number") or "")
+            item.setdefault("channel_code", row.get("channel_code") or "")
+            item.setdefault("channel_logo_text", row.get("channel_logo_text") or "")
+            item.setdefault("icon_signature", row.get("icon_signature") or "")
+            score = _score_guide_program_match(item, query=query, channel=channel)
+            if score > 0 or item.get("selected"):
+                item["match_score"] = score
+                candidates.append(item)
+    candidates.sort(key=lambda x: x.get("match_score", 0.0), reverse=True)
+    return candidates[0] if candidates else {}
+
+
+@app.route("/api/guide/analyze", methods=["POST", "GET"])
+def api_guide_analyze():
+    data = request.get_json(silent=True) or {}
+    frame = monitor.get_frame()
+    if frame is None or not getattr(frame, "size", 0):
+        return jsonify(ok=False, error="no frame available", video=monitor.get_status()), 503
+    try:
+        guide = extract_guide_grid(frame, text="", focus={}, max_rows=int(data.get("max_rows") or request.args.get("max_rows") or 8))
+        learned = {}
+        do_learn = str(data.get("learn", request.args.get("learn", "true"))).lower() not in {"0", "false", "no", "off"}
+        if do_learn and hasattr(crawler.brain, "learn_guide_grid"):
+            learned = crawler.brain.learn_guide_grid(guide, state_id="current_guide", screenshot=None, max_programs_per_channel=32)
+            crawler.brain.save()
+        return jsonify(ok=True, guide=guide, learned=learned, video=monitor.get_status())
+    except Exception as exc:
+        log.exception("guide analyze failed")
+        return jsonify(ok=False, error=str(exc), video=monitor.get_status()), 500
+
+
+@app.route("/api/guide/select", methods=["POST"])
+def api_guide_select():
+    data = request.get_json(silent=True) or {}
+    query = str(data.get("query") or data.get("program") or "").strip()
+    channel = data.get("channel")
+    dry_run = bool(data.get("dry_run", True))
+    frame = monitor.get_frame()
+    if frame is None or not getattr(frame, "size", 0):
+        return jsonify(ok=False, error="no frame available", video=monitor.get_status()), 503
+    try:
+        guide = extract_guide_grid(frame, text="", focus={}, max_rows=int(data.get("max_rows") or 8))
+        match = _best_current_guide_match(guide, query=query, channel=channel)
+        if not match:
+            return jsonify(ok=False, error="no guide program match found", query=query, channel=channel, guide_counts=guide.get("counts"), guide_selected=guide.get("selected")), 404
+        seq = list(match.get("button_sequence") or [])
+        if not seq and match.get("selected"):
+            seq = ["select"]
+        sent: List[Dict[str, Any]] = []
+        if not dry_run:
+            for key in seq:
+                sent.append(_record_or_send_operator_key(str(key), delay_ms=int(data.get("delay_ms", CFG["default_delay_ms"])), gap_s=float(data.get("gap_s", CFG.get("monitor_auto_learning_gap_s", 0.075))), note=f"guide program select: {query or match.get('title') or match.get('channel_number')}"))
+        return jsonify(ok=True, dry_run=dry_run, query=query, channel=channel, match=match, sequence=seq, sent=sent, guide_counts=guide.get("counts"), guide_selected=guide.get("selected"))
+    except Exception as exc:
+        log.exception("guide select failed")
+        return jsonify(ok=False, error=str(exc), query=query, channel=channel, video=monitor.get_status()), 500
 
 
 @app.route("/api/crawl/start", methods=["POST"])
@@ -912,6 +1311,15 @@ def api_crawl_focus():
         return jsonify(ok=False, error=str(exc), status=crawler.status(), video=monitor.get_status()), 500
 
 
+@app.route("/api/crawl/region_first", methods=["POST", "GET"])
+def api_crawl_region_first():
+    try:
+        return jsonify(crawler.analyze_region_first_current())
+    except Exception as exc:
+        log.exception("region-first analysis failed")
+        return jsonify(ok=False, error=str(exc), status=crawler.status(), video=monitor.get_status()), 500
+
+
 @app.route("/api/crawl/enrich_context", methods=["POST", "GET"])
 def api_crawl_enrich_context():
     try:
@@ -959,7 +1367,7 @@ input,textarea { background:#0b1016; color:#e5edf5; border:1px solid #3b4450; bo
 </style>
 </head>
 <body>
-<header><div><b>Teacher Mode</b> <span class="pill">STB: __ALIAS__</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a></div><div id="pill" class="pill inactive">idle</div></header>
+<header><div><b>Teacher Mode</b> <span class="pill">STB: __ALIAS__</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a> · <a href="/channel_surf" style="color:#93c5fd">channel surf</a> · <a href="/ppv" style="color:#93c5fd">ppv lab</a> · <a href="/dashboards" style="color:#93c5fd">dashboards</a></div><div id="pill" class="pill inactive">idle</div></header>
 <main>
 <section class="card"><img class="stream" src="/video.mjpg"><h3>Recent demonstrated transitions</h3><div id="recent"></div></section>
 <aside class="card">
@@ -1022,6 +1430,22 @@ def api_teach_status():
     return jsonify(teacher.status())
 
 
+@app.route("/api/monitor_learning/status")
+def api_monitor_learning_status():
+    st = teacher.status()
+    return jsonify({
+        "ok": True,
+        "enabled": _monitor_learning_enabled(),
+        "interrupts_crawler": bool(CFG.get("monitor_auto_learning_interrupts_crawler", True)),
+        "teacher": st,
+        "async_learning": bool(CFG.get("monitor_auto_learning_async", True)),
+        "queue_depth": _OPERATOR_LEARNING_QUEUE.qsize(),
+        "queue_max": int(CFG.get("monitor_auto_learning_queue_max", 200) or 200),
+        "stats": dict(_OPERATOR_LEARNING_STATS),
+        "crawler_running": bool(crawler.status().get("running")),
+    })
+
+
 @app.route("/api/teach/sessions")
 def api_teach_sessions():
     return jsonify(teacher.list_sessions(limit=int(request.args.get("limit", 20))))
@@ -1076,12 +1500,89 @@ def api_teach_explore_from_here():
 
 
 
+@app.route("/ppv")
+def ppv_page() -> Response:
+    return Response("""<!doctype html><html><head><title>PPV Purchase Test Lab</title>
+<style>body{font-family:Segoe UI,Arial;background:#101318;color:#f4f4f5;margin:24px}.card{background:#181d25;border:1px solid #303746;border-radius:14px;padding:16px;margin:12px 0}button{background:#2563eb;color:white;border:0;border-radius:9px;padding:9px 12px;margin:4px;cursor:pointer}.danger{background:#991b1b}.warn{background:#b45309}pre{white-space:pre-wrap;background:#0b0e13;border:1px solid #2b3240;border-radius:10px;padding:12px;max-height:520px;overflow:auto}label{display:block;margin:8px 0}.muted{color:#a1a1aa}.nav a{color:#93c5fd;margin-right:12px}</style></head><body>
+<div class=nav><a href='/monitor'>Monitor</a><a href='/intelligence'>Intelligence</a><a href='/channel_surf'>Channel Surf</a><a href='/ppv'>PPV Lab</a><a href='/human'>Human</a><a href='/dashboards'>Dashboards</a></div>
+<h1>PPV / On Demand Purchase Test Lab</h1><p class=muted>Default is guarded. Set purchase limits, arm the workflow, analyze the current screen, then dry-run or run a confirmed purchase test on the test account.</p>
+<div class=card><h3>Purchase limits</h3><p class=muted>Use <code>0</code> for free-only. Use <code>unlimited</code> for no cap. Both individual and session limits are enforced before pressing a purchase/confirmation button.</p><label>Individual asset limit ($ or unlimited)</label><input id=individual_limit value='0' style='width:180px'><label>Session total limit ($ or unlimited)</label><input id=session_limit value='0' style='width:180px'><button onclick='getLimits()'>Load Limits</button><button onclick='setLimits()'>Save Limits</button><button onclick='resetSpend()'>Reset Session Spend</button></div>
+<div class=card><h3>On Demand navigation</h3><p class=muted>Default sequence targets the Home top-tabs path. Edit this sequence if your box learns a better route.</p><label>OnDemand route sequence</label><input id=ondemand_seq value='home,right,right,right,right,select' style='width:420px'><button onclick='navOndemand(true)'>Dry Run Route</button><button onclick='navOndemand(false)'>Navigate OnDemand</button></div>
+<div class=card><h3>Current purchase screen</h3><button onclick='status()'>Status</button><button onclick='analyze()'>Analyze Current Screen</button><button class=warn onclick='arm()'>Arm 5 min</button><button onclick='disarm()'>Disarm</button><button onclick='dryRun()'>Dry Run Current</button><button class=danger onclick='runPurchase(false)'>Run Purchase Step</button><button class=danger onclick='runPurchase(true)'>Run + Final Confirm</button><pre id=out>ready</pre></div>
+<script>async function api(u,b){let o={method:b?'POST':'GET',headers:{'Content-Type':'application/json'}}; if(b!==undefined)o.body=JSON.stringify(b); let r=await fetch(u,o); return await r.json()} function show(j){out.textContent=JSON.stringify(j,null,2); if(j.limits){individual_limit.value=j.limits.individual_limit===null?'unlimited':j.limits.individual_limit; session_limit.value=j.limits.session_limit===null?'unlimited':j.limits.session_limit;} if(j.status&&j.status.limits){individual_limit.value=j.status.limits.individual_limit===null?'unlimited':j.status.limits.individual_limit; session_limit.value=j.status.limits.session_limit===null?'unlimited':j.status.limits.session_limit;}} async function status(){show(await api('/api/ppv/status'))} async function analyze(){show(await api('/api/ppv/analyze'))} async function arm(){show(await api('/api/ppv/arm',{ttl_s:300,reason:'operator armed from PPV page'}))} async function disarm(){show(await api('/api/ppv/disarm',{}))} async function dryRun(){show(await api('/api/ppv/purchase_current',{dry_run:true}))} async function runPurchase(finalConfirm){show(await api('/api/ppv/purchase_current',{dry_run:false,confirm_purchase:true,final_confirm:finalConfirm}))} async function getLimits(){show(await api('/api/ppv/limits'))} async function setLimits(){show(await api('/api/ppv/limits',{individual_limit:individual_limit.value,session_limit:session_limit.value}))} async function resetSpend(){show(await api('/api/ppv/reset_session',{}))} async function learnedFlow(){show(await api('/api/ppv/learned_flow'))} async function navOndemand(dry){let seq=ondemand_seq.value.split(',').map(x=>x.trim()).filter(Boolean); show(await api('/api/ppv/navigate_ondemand',{sequence:seq,dry_run:dry,settle_s:0.75}))} status();</script></body></html>""", mimetype="text/html")
+
+
+@app.route("/api/ppv/status")
+def api_ppv_status():
+    return jsonify(ppv_agent.status())
+
+
+@app.route("/api/ppv/analyze", methods=["GET", "POST"])
+def api_ppv_analyze():
+    try:
+        return jsonify(ppv_agent.analyze_current())
+    except Exception as exc:
+        log.exception("ppv analyze failed")
+        return jsonify(ok=False, error=str(exc), status=ppv_agent.status()), 500
+
+
+@app.route("/api/ppv/arm", methods=["POST"])
+def api_ppv_arm():
+    data = request.get_json(silent=True) or {}
+    if not bool(CFG.get("ppv_purchase_test_enabled", False)):
+        return jsonify(ok=False, error="ppv_purchase_test_enabled is false in config.json. Set it true for a test account before arming.", status=ppv_agent.status()), 403
+    return jsonify(ppv_agent.arm(ttl_s=int(data.get("ttl_s", CFG.get("ppv_purchase_arm_ttl_s", 300))), reason=str(data.get("reason") or "operator armed PPV purchase test")))
+
+
+@app.route("/api/ppv/disarm", methods=["POST", "GET"])
+def api_ppv_disarm():
+    return jsonify(ppv_agent.disarm())
+
+
+@app.route("/api/ppv/limits", methods=["GET", "POST"])
+def api_ppv_limits():
+    if request.method == "GET":
+        return jsonify(ok=True, limits=ppv_agent.limits_status(), status=ppv_agent.status())
+    data = request.get_json(silent=True) or {}
+    return jsonify(ppv_agent.set_limits(individual_limit=data.get("individual_limit"), session_limit=data.get("session_limit")))
+
+
+@app.route("/api/ppv/reset_session", methods=["POST", "GET"])
+def api_ppv_reset_session():
+    return jsonify(ppv_agent.reset_session_spend())
+
+
+@app.route("/api/ppv/navigate_ondemand", methods=["POST"])
+def api_ppv_navigate_ondemand():
+    data = request.get_json(silent=True) or {}
+    seq = data.get("sequence") or []
+    if isinstance(seq, str):
+        import re as _re
+        seq = [x.strip() for x in _re.split(r"[,\s]+", seq) if x.strip()]
+    return jsonify(ppv_agent.navigate_ondemand(sequence=list(seq), dry_run=bool(data.get("dry_run", True)), settle_s=float(data.get("settle_s", 1.0))))
+
+
+@app.route("/api/ppv/purchase_current", methods=["POST"])
+def api_ppv_purchase_current():
+    data = request.get_json(silent=True) or {}
+    try:
+        return jsonify(ppv_agent.run_current_purchase_test(
+            confirm_purchase=bool(data.get("confirm_purchase", False)),
+            final_confirm=bool(data.get("final_confirm", False)),
+            max_steps=int(data.get("max_steps", 3)),
+            dry_run=bool(data.get("dry_run", True)),
+        ))
+    except Exception as exc:
+        log.exception("ppv purchase test failed")
+        return jsonify(ok=False, error=str(exc), status=ppv_agent.status()), 500
+
+
 @app.route("/human")
 def human_page() -> Response:
     return Response("""<!doctype html><html><head><title>Human Observer</title><style>
 body{font-family:Segoe UI,Arial;background:#101318;color:#f4f4f5;margin:24px}.card{background:#181d25;border:1px solid #303746;border-radius:14px;padding:16px;margin:12px 0}button{background:#2563eb;color:#fff;border:0;border-radius:9px;padding:9px 12px;margin:4px;cursor:pointer}pre{white-space:pre-wrap;background:#0b0e13;border:1px solid #2b3240;border-radius:10px;padding:12px;max-height:520px;overflow:auto}.pill{display:inline-block;padding:4px 9px;border-radius:999px;background:#263449}.small{color:#a1a1aa}.row{display:flex;gap:14px;flex-wrap:wrap}.col{flex:1;min-width:360px}</style></head><body>
 <h1>Human Observer</h1><p class=small>Shows what the crawler thinks a careful human would notice: transient loading, passive video, PIN/PPV/timer/settings cues, risks, annoyance flags, and matching test playbooks.</p>
-<div class=row><div class=col><div class=card><button onclick="current()">Analyze current screen</button><button onclick="backlog()">Load goal backlog</button><button onclick="playbooks()">Show playbooks</button><button onclick="location.href='/intelligence'">Intelligence</button><button onclick="location.href='/dashboards'">Dashboards</button><pre id=out>ready</pre></div></div><div class=col><div class=card><h3>Current snapshot</h3><img id=img src="/snapshot.jpg" style="max-width:100%;border-radius:12px;border:1px solid #333"><p class=small>Refresh current screen after analysis.</p></div></div></div>
+<div class=row><div class=col><div class=card><button onclick="current()">Analyze current screen</button><button onclick="backlog()">Load goal backlog</button><button onclick="playbooks()">Show playbooks</button><button onclick="location.href='/intelligence'">Intelligence</button><button onclick="location.href='/channel_surf'">Channel Surf</button><button onclick="location.href='/ppv'">PPV Lab</button><button onclick="location.href='/dashboards'">Dashboards</button><pre id=out>ready</pre></div></div><div class=col><div class=card><h3>Current snapshot</h3><img id=img src="/snapshot.jpg" style="max-width:100%;border-radius:12px;border:1px solid #333"><p class=small>Refresh current screen after analysis.</p></div></div></div>
 <script>
 async function post(u,b={}){let r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return await r.json()}
 async function get(u){let r=await fetch(u); return await r.json()}
@@ -1120,7 +1621,7 @@ def parental_page() -> Response:
     return Response("""
 <!doctype html><html><head><meta charset="utf-8"><title>Parental Control Lab</title>
 <style>body{font-family:Segoe UI,Arial,sans-serif;background:#0f1720;color:#e5edf5;margin:0;padding:18px}.card{background:#182231;border:1px solid #304156;border-radius:14px;padding:14px;margin:12px 0}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer}button.warn{background:#b45309}input{background:#0b1220;color:#e5edf5;border:1px solid #3b4b61;border-radius:8px;padding:8px;margin:4px}pre{white-space:pre-wrap;background:#09111c;border:1px solid #253548;border-radius:12px;padding:12px;max-height:520px;overflow:auto}.hint{color:#9fb0c6}</style></head>
-<body><h1>Parental Control Lab <span class=hint>v12 active fallback</span></h1>
+<body><p class=hint><a href='/monitor'>Monitor</a> · <a href='/intelligence'>Intelligence</a> · <a href='/channel_surf'>Channel Surf</a> · <a href='/ppv'>PPV Lab</a> · <a href='/dashboards'>Dashboards</a></p><h1>Parental Control Lab <span class=hint>v12 active fallback</span></h1>
 <p class=hint>This page uses the learned map first. If no learned route exists, v12 actively tries HOME → focused Settings → focused Parental/Locks. Dry-run does not move the STB. PIN is stored locally in crawler_data/parental_control_memory.json.</p>
 <div class=card><label>PIN <input id=pin value="1234"></label><label>Test blocked channel <input id=channel value="125"></label><br><label>Final setup sequence <input id=setupseq placeholder="optional exact keys after reaching PC settings: down,select,1,2,3,4,select" size=80></label><br><label>Final disable sequence <input id=disseq placeholder="optional exact keys after reaching PC settings: down,select,..." size=80></label></div>
 <div class=card><button onclick="status()">Status</button><button onclick="focusNow()">Current Focus</button><button onclick="find(false)">Active find PC Settings</button><button onclick="setup(true)">Dry-run setup plan</button><button class=warn onclick="setup(false)">Active setup/find</button><button onclick="verify(false)">Verify blocked channel / unlock</button><button onclick="disable(true)">Dry-run disable plan</button><button class=warn onclick="disable(false)">Active disable/find</button><button onclick="pinprompt()">Detect/enter PIN if prompted</button></div>
@@ -1216,7 +1717,28 @@ def api_crawl_export():
 
 @app.route("/api/crawl/map")
 def api_crawl_map():
-    return jsonify(crawler.visual_map())
+    # v33: the intelligence page used to request the full graph every few seconds.
+    # With thousands of states that can hang the browser and tie up Flask workers.
+    # Default to a UI-friendly slice; callers can explicitly request more.
+    try:
+        max_nodes = max(20, min(800, int(request.args.get("max_nodes", "240"))))
+    except Exception:
+        max_nodes = 240
+    try:
+        max_edges = max(20, min(1500, int(request.args.get("max_edges", "420"))))
+    except Exception:
+        max_edges = 420
+    include_transitions = str(request.args.get("transitions", "0")).lower() in {"1", "true", "yes"}
+    try:
+        transition_limit = max(1, min(500, int(request.args.get("transition_limit", "120"))))
+    except Exception:
+        transition_limit = 120
+    return jsonify(crawler.visual_map(
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+        include_transitions=include_transitions,
+        transition_limit=transition_limit,
+    ))
 
 
 @app.route("/api/crawl/transitions")
@@ -1368,7 +1890,7 @@ def _dashboard_shell(title: str, mode: str, payload: Dict[str, Any]) -> str:
   <div class='top'>
     <div><h1>{title}</h1><div class='subtitle'>Autonomous set-top learning, training, known-knowns, known-unknowns, and progress history. Generated <span id='gen'></span>.</div></div>
     <div class='nav'>
-      <a href='/dashboards'>Hub</a><a href='/dashboard/exec'>Exec</a><a href='/dashboard/eng'>Engineering</a><a href='/intelligence'>Intelligence</a><a href='/api/dashboards/superset.zip'>Superset Export</a>
+      <a href='/dashboards'>Hub</a><a href='/dashboard/exec'>Exec</a><a href='/dashboard/eng'>Engineering</a><a href='/intelligence'>Intelligence</a><a href='/channel_surf'>Channel Surf</a><a href='/ppv'>PPV Lab</a><a href='/api/dashboards/superset.zip'>Superset Export</a>
     </div>
   </div>
 </header>
@@ -1396,10 +1918,17 @@ function renderExec() {{
   let html = `<div class='grid'>`;
   html += kpi('Learning maturity', pct(h.learning_maturity_pct), h.learning_maturity_pct>70?'good':h.learning_maturity_pct>35?'warn':'bad');
   html += kpi('States', h.states||0); html += kpi('Transitions', h.transitions||0); html += kpi('Known unknowns', h.known_unknowns||0, h.known_unknowns?'warn':'good');
+  html += kpi('Observed channels', h.observed_channels||0, 'info'); html += kpi('Latest programming', h.channels_with_latest_programming||0, 'good'); html += kpi('PPV spend', '$'+Number(h.ppv_session_spend_observed||0).toFixed(2), h.ppv_session_spend_observed>0?'warn':'good'); html += kpi('PPV blocked by limit', h.ppv_blocked_by_limit||0, h.ppv_blocked_by_limit?'warn':'good'); html += kpi('Observed STB clocks', h.observed_stb_time_reads||0, 'info'); html += kpi('Time discrepancies', h.time_discrepancies||0, h.time_discrepancies?'warn':'good');
   html += `<section class='card span-6'><h3>Executive readout</h3>${{(d.narrative||[]).map(x=>`<p>${{esc(x)}}</p>`).join('')}}${{progress('Coverage',h.coverage_pct)}}${{progress('Perception quality',h.perception_quality_pct)}}${{progress('Avg transition confidence',(h.avg_transition_confidence||0)*100)}}${{progress('Avg focus confidence',(h.avg_focus_confidence||0)*100)}}</section>`;
   html += bars('Learning history: new states/hour', d.timeline||[], 'bucket', 'new_states', 'span-6');
   html += table('Top learned menus', (d.top_known_menus||[]).map(x=>({{menu:x[0], count:x[1]}})), [{{k:'menu',t:'Menu/Page'}},{{k:'count',t:'Seen'}}], 'span-6', 30);
-  html += table('Known channels', d.channels||[], [{{k:'channel'}},{{k:'name_guess',t:'Name guess'}},{{k:'symbols'}},{{k:'confidence'}}], 'span-6', 80);
+  html += table('Observed channel catalog / latest programming', d.channel_catalog||[], [{{k:'observed_channel_label',t:'Observed channel'}},{{k:'learned_channel_name',t:'Learned name'}},{{k:'latest_program_title',t:'Latest program'}},{{k:'latest_program_description',t:'Latest description'}},{{k:'latest_displayed_time',t:'Observed STB time'}},{{k:'latest_time_drift_minutes',t:'drift min'}},{{k:'latest_live_banner_valid',t:'banner ok'}},{{k:'latest_live_banner_score',t:'banner score'}},{{k:'latest_live_banner_program_title',t:'banner title'}},{{k:'latest_live_banner_channel_number',t:'banner ch'}},{{k:'latest_live_banner_channel_code',t:'banner code'}},{{k:'banner_valid_pct',t:'banner ok %'}},{{k:'active_video_pct',t:'active %'}}], 'span-12', 120);
+  html += table('Known channels from brain', d.channels||[], [{{k:'channel'}},{{k:'name_guess',t:'Name guess'}},{{k:'symbols'}},{{k:'confidence'}}], 'span-6', 80);
+  html += table('Observed STB displayed times', d.observed_stb_times||[], [{{k:'ts'}},{{k:'channel_number',t:'channel'}},{{k:'channel_code',t:'name/code'}},{{k:'surface'}},{{k:'displayed_time',t:'displayed'}},{{k:'actual_iso'}},{{k:'drift_minutes'}},{{k:'program_title',t:'program'}}], 'span-6', 120);
+  html += table('Channel Surf observations', d.channel_surf||[], [{{k:'ts'}},{{k:'channel'}},{{k:'actual_channel_guess',t:'actual'}},{{k:'channel_code_guess',t:'name/code'}},{{k:'program_title_guess',t:'program'}},{{k:'live_banner_valid',t:'banner ok'}},{{k:'live_banner_validation_score',t:'banner score'}},{{k:'live_banner_program_title',t:'banner title'}},{{k:'display_time',t:'STB time'}},{{k:'input_method'}},{{k:'live_signal_class'}},{{k:'tune_complete_s'}},{{k:'warning_flags'}}], 'span-12', 80);
+  html += table('On Demand displayed clock reads', d.ppv_display_times||[], [{{k:'ts'}},{{k:'screen_stage',t:'stage'}},{{k:'title'}},{{k:'displayed_time',t:'displayed'}},{{k:'actual_iso'}},{{k:'drift_minutes',t:'drift'}},{{k:'confidence'}},{{k:'flags'}}], 'span-12', 120);
+  html += table('PPV / On Demand purchases and price guardrails', d.ppv_purchases||[], [{{k:'ts'}},{{k:'event_type',t:'event'}},{{k:'operator_key',t:'key'}},{{k:'screen_stage',t:'stage'}},{{k:'title'}},{{k:'displayed_time',t:'OnDemand time'}},{{k:'display_time_drift_minutes',t:'drift'}},{{k:'price_text',t:'price'}},{{k:'cost_category',t:'category'}},{{k:'individual_limit_label',t:'individual limit'}},{{k:'session_limit_label',t:'session limit'}},{{k:'session_spent',t:'session spent'}},{{k:'allowed'}},{{k:'authorization_reason',t:'reason'}},{{k:'final_confirm',t:'final confirm'}}], 'span-12', 120);
+  html += table('Displayed clock discrepancies', d.time_discrepancies||[], [{{k:'ts'}},{{k:'channel'}},{{k:'surface'}},{{k:'displayed'}},{{k:'drift_minutes'}},{{k:'severity'}},{{k:'source'}}], 'span-12', 80);
   html += table('Highest priority known-unknowns', d.known_unknowns||[], [{{k:'unknown_type',t:'Type'}},{{k:'label'}},{{k:'action'}},{{k:'priority'}}], 'span-12', 60);
   html += `</div>`; app.innerHTML=html;
 }}
@@ -1409,6 +1938,12 @@ function renderEng() {{
   html += kpi('States', h.states||0); html += kpi('Edges', h.transitions||0); html += kpi('Coverage', pct(h.coverage_pct)); html += kpi('Quality', pct(h.perception_quality_pct));
   html += table('Per-action coverage', d.per_action_coverage||[], [{{k:'action'}},{{k:'tried'}},{{k:'total'}},{{k:'coverage_pct',t:'coverage %'}}], 'span-6', 30);
   html += table('Action timing / rewards', d.actions||[], [{{k:'action'}},{{k:'avg_reward'}},{{k:'reward_attempts'}},{{k:'avg_start_s'}},{{k:'avg_complete_s'}},{{k:'remarkable_count'}},{{k:'last_flags'}}], 'span-6', 40);
+  html += table('Observed channel catalog / latest programming', d.channel_catalog||[], [{{k:'channel_number'}},{{k:'observed_channel_code',t:'obs code'}},{{k:'observed_channel_name',t:'obs name'}},{{k:'learned_channel_name',t:'learned'}},{{k:'latest_program_title'}},{{k:'latest_displayed_time',t:'STB time'}},{{k:'latest_time_drift_minutes',t:'drift'}},{{k:'latest_live_banner_valid',t:'banner ok'}},{{k:'latest_live_banner_score',t:'banner score'}},{{k:'latest_live_banner_program_title',t:'banner title'}},{{k:'latest_live_banner_channel_number',t:'banner ch'}},{{k:'latest_live_banner_channel_code',t:'banner code'}},{{k:'latest_live_banner_flags',t:'banner flags'}},{{k:'names_seen'}},{{k:'programs_seen'}}], 'span-12', 250);
+  html += table('Observed STB displayed times', d.observed_stb_times||[], [{{k:'ts'}},{{k:'channel_number',t:'channel'}},{{k:'channel_code',t:'code'}},{{k:'surface'}},{{k:'displayed_time'}},{{k:'actual_iso'}},{{k:'drift_minutes'}},{{k:'confidence'}},{{k:'program_title'}}], 'span-12', 250);
+  html += table('Channel Surf observations', d.channel_surf||[], [{{k:'ts'}},{{k:'channel'}},{{k:'requested_channel'}},{{k:'actual_channel_guess'}},{{k:'channel_code_guess',t:'code'}},{{k:'program_title_guess',t:'program'}},{{k:'best_displayed_datetime',t:'metadata time'}},{{k:'display_time',t:'clock'}},{{k:'live_banner_valid',t:'banner ok'}},{{k:'live_banner_validation_score',t:'banner score'}},{{k:'live_banner_channel_number',t:'banner ch'}},{{k:'live_banner_channel_code',t:'banner code'}},{{k:'live_banner_program_title',t:'banner title'}},{{k:'live_banner_validation_flags',t:'banner flags'}},{{k:'input_method'}},{{k:'skipped_channel_note'}},{{k:'live_signal_class'}},{{k:'display_time_drift_minutes'}},{{k:'warning_flags'}}], 'span-12', 160);
+  html += table('On Demand displayed clock reads', d.ppv_display_times||[], [{{k:'ts'}},{{k:'screen_stage',t:'stage'}},{{k:'title'}},{{k:'displayed_time',t:'displayed'}},{{k:'actual_iso'}},{{k:'drift_minutes',t:'drift'}},{{k:'confidence'}},{{k:'source'}},{{k:'flags'}}], 'span-12', 160);
+  html += table('PPV / On Demand purchase events', d.ppv_purchases||[], [{{k:'ts'}},{{k:'event_type',t:'event'}},{{k:'operator_key',t:'key'}},{{k:'screen_stage',t:'stage'}},{{k:'before_screen_stage',t:'from stage'}},{{k:'title'}},{{k:'displayed_time',t:'OnDemand time'}},{{k:'display_time_drift_minutes',t:'drift'}},{{k:'price_text',t:'price'}},{{k:'price_amount',t:'amount'}},{{k:'cost_category',t:'category'}},{{k:'individual_limit_label',t:'individual limit'}},{{k:'session_limit_label',t:'session limit'}},{{k:'session_spent'}},{{k:'allowed'}},{{k:'authorization_reason',t:'reason'}},{{k:'pricing_flags',t:'pricing flags'}},{{k:'screenshot'}}], 'span-12', 220);
+  html += table('Displayed clock drift by surface', d.time_discrepancies||[], [{{k:'ts'}},{{k:'channel'}},{{k:'surface'}},{{k:'displayed'}},{{k:'actual_iso'}},{{k:'drift_minutes'}},{{k:'confidence'}},{{k:'flags'}}], 'span-12', 160);
   html += bars('Exploration history: edges seen/hour', d.timeline||[], 'bucket', 'edge_seen', 'span-6');
   html += table('Quality breakdown', d.quality_breakdown||[], [{{k:'quality'}},{{k:'count'}}], 'span-3', 10);
   html += table('Pattern breakdown', d.pattern_breakdown||[], [{{k:'pattern'}},{{k:'count'}}], 'span-3', 20);
@@ -1432,7 +1967,9 @@ def dashboards_home():
     <h1>STB Autonomous Learning Dashboards</h1><p class='muted'>Two Superset-style views over the crawler's training brain, graph, known-knowns, known-unknowns, progress and history.</p>
     <div class='grid'><div class='card'><a href='/dashboard/exec'>Executive dashboard</a><p>Leadership view: maturity, progress, confidence, risk, known channels, and remaining unknowns.</p><div class='k'>{ex.get('learning_maturity_pct',0)}%</div><p class='muted'>learning maturity</p></div>
     <div class='card'><a href='/dashboard/eng'>Engineering dashboard</a><p>Debug view: coverage, OCR/focus quality, low-confidence transitions, action timing/rewards, and training backlog.</p><div class='k'>{ex.get('states',0)} / {ex.get('transitions',0)}</div><p class='muted'>states / transitions</p></div>
-    <div class='card'><a href='/api/dashboards/superset.zip'>Download Superset export</a><p>CSV datasets, SQL helper views, and dashboard manifests for Superset import.</p><div class='k'>{ex.get('known_unknowns',0)}</div><p class='muted'>known unknowns</p></div></div>
+    <div class='card'><a href='/api/dashboards/superset.zip'>Download Superset export</a><p>CSV datasets, SQL helper views, and dashboard manifests for Superset import.</p><div class='k'>{ex.get('known_unknowns',0)}</div><p class='muted'>known unknowns</p></div>
+    <div class='card'><a href='/channel_surf'>Channel Surf Lab</a><p>Scan channels via direct tune or CH+/CH-, verify video/guide/info alignment, and track displayed-clock drift.</p><div class='k'>{ex.get('channel_surf_observations',0)}</div><p class='muted'>channel observations</p></div>
+    <div class='card'><a href='/ppv'>PPV Purchase Test Lab</a><p>Explicitly armed test-account PPV ordering workflow with live-screen analysis and confirmation guardrails.</p><div class='k'>{ex.get('ppv_observations',0)}</div><p class='muted'>PPV/purchase cues observed</p></div></div>
     </body></html>"""
     return Response(html, mimetype="text/html")
 
@@ -1477,6 +2014,76 @@ def api_dashboards_superset_zip():
     return send_file(io.BytesIO(blob), mimetype="application/zip", as_attachment=True, download_name="stb_learning_superset_dashboards.zip")
 
 
+
+@app.route("/channel_surf")
+def channel_surf_page() -> Response:
+    html = """<!doctype html><html><head><title>Channel Surf Lab</title><style>
+body{font-family:Segoe UI,Arial;background:#101318;color:#f4f4f5;margin:24px}.card{background:#181d25;border:1px solid #303746;border-radius:14px;padding:16px;margin:12px 0}button{background:#2563eb;color:white;border:0;border-radius:9px;padding:9px 12px;margin:4px;cursor:pointer}.warn{background:#b45309}.danger{background:#991b1b}input,textarea,select{width:100%;box-sizing:border-box;background:#0b0e13;color:#f4f4f5;border:1px solid #334155;border-radius:8px;padding:8px;margin:6px 0}pre{white-space:pre-wrap;background:#0b0e13;border:1px solid #2b3240;border-radius:10px;padding:12px;max-height:520px;overflow:auto}.row{display:flex;gap:14px;flex-wrap:wrap}.col{flex:1;min-width:360px}.muted{color:#a1a1aa}a{color:#93c5fd}.nav a{margin-right:12px}</style></head><body>
+<div class=nav><a href='/monitor'>Monitor</a><a href='/intelligence'>Intelligence</a><a href='/human'>Human Observer</a><a href='/ppv'>PPV Lab</a><a href='/dashboards'>Dashboards</a><a href='/dashboard/eng'>Engineering</a><a href='/api/channel_surf/export'>Export Log</a></div>
+<h1>Channel Surf Lab</h1>
+<p class=muted>Tunes or steps channels, verifies video health, reads Info/Guide context, extracts displayed receiver time, detects clock drift, discovers skipped CH+/CH− channels, and logs channel/program/PPV/alignment observations. PPV is observe-only here; use the PPV Purchase Test Lab for explicitly armed test-account ordering.</p><p><a href="/ppv">PPV Purchase Test Lab</a></p>
+<div class=row>
+<div class=col><div class=card>
+<h2>Scan controls</h2>
+<label>Surf mode</label><select id=surf_mode><option value='direct'>Direct numeric tune listed/range channels</option><option value='channel_up'>Start then CH+ to discover next channels</option><option value='channel_down'>Start then CH− to discover previous channels</option></select>
+<label>Channels or range</label><textarea id=channels>""" + ",".join(map(str, CFG.get("channel_surf_default_channels", []))) + """</textarea>
+<label>Start channel</label><input id=start_channel placeholder="required for CH+/CH- mode; optional for direct">
+<label>Stop channel</label><input id=stop_channel placeholder="optional direct-mode range">
+<label>Max channels / steps</label><input id=max_channels value='""" + str(CFG.get("channel_surf_max_channels",25)) + """'>
+<label><input type=checkbox id=collect_info checked style='width:auto'> Collect Info screen</label><br>
+<label><input type=checkbox id=collect_guide checked style='width:auto'> Collect Guide context</label><br>
+<label><input type=checkbox id=recover_black checked style='width:auto'> Recover black screen with CH+/CH-/Live</label><br>
+<button onclick='startSurf()'>Start channel surf</button><button class=warn onclick='stopSurf()'>Stop</button><button onclick='bootstrap()'>Run Sys Diag Bootstrap</button>
+<p class=muted>Use CH+ / CH− mode when you want the box itself to reveal skipped/unmapped channels instead of assuming every number exists.</p>
+</div></div>
+<div class=col><div class=card><h2>Status</h2><pre id=status>loading...</pre></div></div>
+</div>
+<script>
+async function refresh(){let r=await fetch('/api/channel_surf/status');let j=await r.json();document.getElementById('status').textContent=JSON.stringify(j,null,2);}
+async function startSurf(){let body={channels:document.getElementById('channels').value,start_channel:document.getElementById('start_channel').value,stop_channel:document.getElementById('stop_channel').value,max_channels:document.getElementById('max_channels').value,surf_mode:document.getElementById('surf_mode').value,collect_info:document.getElementById('collect_info').checked,collect_guide:document.getElementById('collect_guide').checked,recover_black:document.getElementById('recover_black').checked};let r=await fetch('/api/channel_surf/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2);}
+async function stopSurf(){let r=await fetch('/api/channel_surf/stop',{method:'POST'});document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2);}
+async function bootstrap(){let r=await fetch('/api/test/bootstrap_sysdiag',{method:'POST'});document.getElementById('status').textContent=JSON.stringify(await r.json(),null,2);}
+setInterval(refresh,1500); refresh();
+</script></body></html>"""
+    return Response(html, mimetype="text/html")
+
+
+@app.route("/api/test/bootstrap_sysdiag", methods=["POST", "GET"])
+def api_test_bootstrap_sysdiag():
+    # Force one supervised bootstrap even if the crawler default setting is off.
+    old = crawler.config.sysdiag_bootstrap_enabled
+    crawler.config.sysdiag_bootstrap_enabled = True
+    try:
+        result = crawler.bootstrap_sysdiag_then_live()
+        return jsonify(ok=bool(result.get("ok")), result=result)
+    finally:
+        crawler.config.sysdiag_bootstrap_enabled = old
+
+
+@app.route("/api/channel_surf/start", methods=["POST"])
+def api_channel_surf_start():
+    data = request.get_json(silent=True) or {}
+    return jsonify(channel_surf.start(data))
+
+
+@app.route("/api/channel_surf/stop", methods=["POST", "GET"])
+def api_channel_surf_stop():
+    return jsonify(channel_surf.stop())
+
+
+@app.route("/api/channel_surf/status")
+def api_channel_surf_status():
+    return jsonify(channel_surf.status())
+
+
+@app.route("/api/channel_surf/export")
+def api_channel_surf_export():
+    path = CRAWLER_DIR / "channel_surf_log.json"
+    if not path.exists():
+        return jsonify(ok=False, error="no channel surf log yet"), 404
+    return send_file(path, mimetype="application/json", as_attachment=True, download_name="channel_surf_log.json")
+
+
 @app.route("/api/self-test")
 def api_self_test():
     alias = str(CFG["stb_alias"])
@@ -1491,9 +2098,119 @@ def api_self_test():
     return jsonify(ok=all(checks.values()), checks=checks, video=monitor.get_status(), stb=store.get(alias))
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v36 Multi-Input RTSP Switcher API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/capture/inputs", methods=["GET"])
+def api_capture_inputs():
+    """List available capture inputs (local devices + known RTSP streams)."""
+    import platform
+    inputs = []
+    backend_cv = cv2.CAP_DSHOW if platform.system().lower() == "windows" else cv2.CAP_ANY
+    for i in range(10):
+        try:
+            cap = cv2.VideoCapture(i, backend_cv)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    inputs.append({"device": i, "type": "local", "label": f"Local device {i} ({frame.shape[1]}x{frame.shape[0]})", "resolution": f"{frame.shape[1]}x{frame.shape[0]}"})
+                cap.release()
+        except Exception:
+            pass
+    dev = CFG.get("capture_device")
+    if isinstance(dev, str) and dev.startswith(("rtsp://", "rtmp://", "http://", "https://")):
+        inputs.append({"device": dev, "type": "rtsp", "label": f"RTSP Encoder ({dev})", "resolution": "auto"})
+    rtsp_env = os.environ.get("MERGED_RTSP_URL")
+    if rtsp_env and rtsp_env != dev:
+        inputs.append({"device": rtsp_env, "type": "rtsp", "label": f"RTSP (env) ({rtsp_env})", "resolution": "auto"})
+    status = monitor.get_status()
+    return jsonify(inputs=inputs, active={"device": monitor.device, "type": status.get("device_type", "unknown"), "label": status.get("source_label", ""), "status": status.get("status"), "resolution": f"{status.get('width', 0)}x{status.get('height', 0)}"})
+
+
+@app.route("/api/capture/select", methods=["POST"])
+def api_capture_select():
+    """Switch the active capture input at runtime."""
+    import threading as _th
+    data = request.get_json(force=True) if request.is_json else request.form.to_dict()
+    device = data.get("device")
+    if device is None:
+        abort(400, description="Missing 'device' field")
+    try:
+        device = int(device)
+    except (ValueError, TypeError):
+        pass
+    backend = data.get("backend")
+    width = int(data["width"]) if "width" in data else None
+    height = int(data["height"]) if "height" in data else None
+    label = data.get("label")
+    def _do_switch():
+        try:
+            monitor.switch_source(device=device, backend=backend, width=width, height=height, label=label)
+            log.info("Capture switched to %r", device)
+        except Exception as exc:
+            log.exception("switch_source failed: %s", exc)
+    _th.Thread(target=_do_switch, daemon=True).start()
+    return jsonify(ok=True, switching_to=str(device), message="Switch initiated")
+
+
+@app.route("/api/capture/scan", methods=["GET", "POST"])
+def api_capture_scan():
+    """Scan for available capture sources."""
+    import platform
+    results = []
+    backend_cv = cv2.CAP_DSHOW if platform.system().lower() == "windows" else cv2.CAP_ANY
+    for i in range(10):
+        try:
+            cap = cv2.VideoCapture(i, backend_cv)
+            if cap.isOpened():
+                ok, frame = cap.read()
+                results.append({"device": i, "type": "local", "available": True, "has_frame": bool(ok and frame is not None and frame.size), "resolution": f"{frame.shape[1]}x{frame.shape[0]}" if ok and frame is not None else None})
+                cap.release()
+            else:
+                results.append({"device": i, "type": "local", "available": False})
+        except Exception:
+            results.append({"device": i, "type": "local", "available": False})
+    dev = CFG.get("capture_device")
+    if isinstance(dev, str) and dev.startswith(("rtsp://", "rtmp://", "http://", "https://")):
+        try:
+            cap = cv2.VideoCapture(dev, cv2.CAP_FFMPEG)
+            opened = cap.isOpened()
+            ok, frame = (False, None)
+            if opened:
+                ok, frame = cap.read()
+            results.append({"device": dev, "type": "rtsp", "available": opened, "has_frame": bool(ok and frame is not None), "resolution": f"{frame.shape[1]}x{frame.shape[0]}" if ok and frame is not None else None})
+            cap.release()
+        except Exception as e:
+            results.append({"device": dev, "type": "rtsp", "available": False, "error": str(e)})
+    return jsonify(results=results)
+
+
+def _find_available_port(host: str, start_port: int, max_attempts: int = 20) -> int:
+    """Find the next available TCP port starting from start_port."""
+    import socket
+    for offset in range(max_attempts):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+                return port
+        except OSError:
+            log.debug("Port %d in use, trying next...", port)
+    raise RuntimeError(f"No available port in range {start_port}-{start_port + max_attempts - 1}")
+
+
 def main() -> None:
     host = str(CFG["server_host"])
-    port = int(CFG["server_port"])
+    preferred_port = int(CFG["server_port"])
+    port = _find_available_port(host, preferred_port)
+    if port != preferred_port:
+        log.warning("Port %d in use — using next available: %d", preferred_port, port)
     log.info("Merged app starting on http://%s:%s/monitor", host, port)
     log.info("JAMBOREE_BASE=%s", os.environ.get("JAMBOREE_BASE"))
     log.info("Controlling STB alias=%s via remote=%s", CFG["stb_alias"], CFG["remote"])

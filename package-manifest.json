@@ -1,0 +1,69 @@
+{
+  "package_name": "chat-agent-installer",
+  "version": "1.0.0",
+  "build_date": "2026-02-04",
+  "platforms": [
+    "linux",
+    "windows",
+    "macos"
+  ],
+  "components": {
+    "backend": {
+      "language": "Python",
+      "framework": "FastAPI",
+      "version": "3.12+"
+    },
+    "frontend": {
+      "language": "JavaScript/TypeScript",
+      "framework": "Next.js",
+      "version": "20+"
+    },
+    "database": {
+      "type": "PostgreSQL",
+      "version": "14+"
+    }
+  },
+  "tools": [
+    "public_web_search",
+    "internal_search",
+    "netra_search",
+    "dish_internal_tool",
+    "cluster_inspect"
+  ],
+  "packages": [
+    {
+      "name": "chat-agent-linux-installer.tar.gz",
+      "platform": "linux",
+      "format": "tar.gz",
+      "size_mb": 1.0
+    },
+    {
+      "name": "chat-agent-windows-installer.zip",
+      "platform": "windows",
+      "format": "zip",
+      "size_mb": 1.27
+    },
+    {
+      "name": "chat-agent-macos-installer.tar.gz",
+      "platform": "macos",
+      "format": "tar.gz",
+      "size_mb": 1.0
+    },
+    {
+      "name": "chat-agent-universal-installer.tar.gz",
+      "platform": "all",
+      "format": "tar.gz",
+      "size_mb": 1.0
+    }
+  ],
+  "documentation": [
+    "README.md",
+    "INSTALLATION-SUMMARY.md",
+    "QUICKSTART-LINUX.md",
+    "QUICKSTART-WINDOWS.md",
+    "QUICKSTART-MACOS.md"
+  ],
+  "utilities": [
+    "verify-package.sh"
+  ]
+}
