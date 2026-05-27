@@ -381,6 +381,15 @@ class LearningDatasetWriter:
         for path in paths:
             data = read_json(Path(path), {}) or {}
             events = as_list(data.get("events"))
+            state_idx: Dict[str, Dict[str, Any]] = {}
+            for sev in events:
+                if not isinstance(sev, dict):
+                    continue
+                st = sev.get("state")
+                if isinstance(st, dict):
+                    sid = str(first_present(sev.get("state_id"), st.get("state_id"), st.get("id"), st.get("key")))
+                    if sid:
+                        state_idx[sid] = st
             pending: Optional[Dict[str, Any]] = None
             local_step = 0
             for ev in events:
@@ -409,8 +418,8 @@ class LearningDatasetWriter:
                         after_state_id=after_id,
                         action=action,
                         action_sequence=[action],
-                        before_image=self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image")), out_dir, f"teach_{local_step:06d}_before"),
-                        after_image=self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image")), out_dir, f"teach_{local_step:06d}_after"),
+                        before_image=self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image"), self._state_image_source(before_id, state_idx)), out_dir, f"teach_{local_step:06d}_before"),
+                        after_image=self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image"), self._state_image_source(after_id, state_idx)), out_dir, f"teach_{local_step:06d}_after"),
                         before_label=str(rec.get("before_label") or ""),
                         after_label=str(rec.get("after_label") or ""),
                         ocr_text=str(first_present(rec.get("ocr_text"), rec.get("after_ocr"))),
@@ -423,6 +432,43 @@ class LearningDatasetWriter:
                     )
                     local_step += 1
                     pending = None
+
+    def _state_image_source(self, state_id: Any, state_idx: Optional[Dict[str, Dict[str, Any]]] = None) -> Any:
+        """Resolve a screenshot/image path for a learned state id."""
+        sid = str(state_id or "").strip()
+        if not sid:
+            return ""
+
+        state: Dict[str, Any] = {}
+        if state_idx:
+            state = state_idx.get(sid, {}) or {}
+
+        direct = first_present(
+            state.get("before_screenshot") if isinstance(state, dict) else "",
+            state.get("after_screenshot") if isinstance(state, dict) else "",
+            state.get("screenshot") if isinstance(state, dict) else "",
+            state.get("image") if isinstance(state, dict) else "",
+            state.get("image_path") if isinstance(state, dict) else "",
+        )
+        if direct:
+            return direct
+
+        roots = [
+            self.crawler_dir / "states",
+            self.root_dir / "crawler_data" / "states",
+            self.root_dir / "states",
+        ]
+        for root in roots:
+            if not root.exists():
+                continue
+            matches = []
+            for ext in ("jpg", "jpeg", "png", "webp"):
+                matches.extend(root.glob(f"{sid}*.{ext}"))
+            if matches:
+                matches.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
+                return str(matches[0])
+        return ""
+
 
     def _episodes_from_channel_surf(self, paths: List[str], out_dir: Path, offset: int = 0) -> Iterator[LearningEpisode]:
         for path in paths:

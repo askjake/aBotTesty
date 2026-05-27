@@ -122,7 +122,7 @@ def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
     warmup_ratio: 0.05
     bf16: true
     quantization_bit: {quant}
-    flash_attn: fa2
+    flash_attn: auto
     report_to: none
     """).strip() + "\n"
 
@@ -187,10 +187,36 @@ def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str
 
     {bootstrap}
 
-    python -m pip install --upgrade pip wheel setuptools
-    python -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
-    python -m pip install --upgrade git+https://github.com/huggingface/transformers accelerate datasets peft bitsandbytes pillow qwen-vl-utils tensorboard
-    python -m pip install --upgrade git+https://github.com/hiyouga/LLaMA-Factory.git
+    python -m pip install --upgrade pip wheel setuptools packaging
+    python -m pip uninstall -y torch torchvision torchaudio transformers accelerate datasets peft pillow llamafactory || true
+    python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
+
+    cat > /tmp/abot_lf_constraints.txt <<'CONSTRAINTS'
+accelerate>=1.3.0,<=1.11.0
+datasets>=2.16.0,<=4.0.0
+peft>=0.18.0,<=0.18.1
+transformers>=4.55.0,<=5.6.0,!=4.52.0,!=4.57.0
+pillow>=8,<12
+CONSTRAINTS
+
+    python -m pip freeze | grep -E '^(torch|torchvision|torchaudio)==' >> /tmp/abot_lf_constraints.txt
+
+    python -m pip install --no-cache-dir \
+      --extra-index-url https://download.pytorch.org/whl/cu121 \
+      -c /tmp/abot_lf_constraints.txt \
+      "llamafactory @ git+https://github.com/hiyouga/LLaMA-Factory.git" \
+      bitsandbytes qwen-vl-utils tensorboard
+
+    python -m pip check || true
+    python - <<'PYTORCH_CHECK'
+import torch, torchaudio, transformers, accelerate, datasets, peft
+print("torch", torch.__version__, "cuda", torch.version.cuda, "cuda_available", torch.cuda.is_available(), "gpus", torch.cuda.device_count())
+print("torchaudio", torchaudio.__version__)
+print("transformers", transformers.__version__)
+print("accelerate", accelerate.__version__)
+print("datasets", datasets.__version__)
+print("peft", peft.__version__)
+PYTORCH_CHECK
 
     rm -rf dataset dataset_registry
     mkdir -p dataset dataset_registry
