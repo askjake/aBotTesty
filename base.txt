@@ -1,13 +1,13 @@
 {
-  "stbs": {
-    "found1": {
-      "protocol": "SGS",
-      "role": "hopper",
-      "remote": "sgs",
-      "ip": "192.168.0.145",
-      "stb": "R1886469480-82",
-      "receiver": "XAF7486e214f5de",
-      "cid": 1004
+    "stbs": {
+        "found1": {
+            "protocol": "SGS",
+            "role": "hopper",
+            "remote": "4",
+            "ip": "10.73.184.63",
+            "stb": "R1886354835-41",
+            "receiver": "",
+            "cid": 4
+        }
     }
-  }
 }
