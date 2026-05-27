@@ -182,10 +182,27 @@ def send_sgs(
     if tgt.get("lname") and tgt.get("passwd"):
         extra = ["--prod", "--login", tgt["lname"], "--passwd", tgt["passwd"]]
 
-    cmd = [sys.executable, "-m", "jamboree.sgs_remote", "-n", target_name, "-i", target_ip, *extra, json.dumps(payload)]
+    # Prefer this bundle's local venv interpreter for the helper subprocess.
+    # If the Flask app was accidentally started from an old bundle/venv,
+    # sys.executable can point at that old path even though this code is the
+    # new version.  Using the local .venv keeps SGS helper execution aligned
+    # with the bundle on disk and makes the debug logs less misleading.
+    project_root = Path(__file__).resolve().parent.parent if Path(__file__).resolve().parent.name == "jamboree" else Path(__file__).resolve().parent
+    local_python = project_root / ".venv" / "Scripts" / "python.exe"
+    if not local_python.exists():
+        local_python = project_root / ".venv" / "bin" / "python"
+    helper_python = str(local_python) if local_python.exists() else sys.executable
+    cmd = [helper_python, "-m", "jamboree.sgs_remote", "-n", target_name, "-i", target_ip, *extra, json.dumps(payload)]
 
     if verbose or logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug("—" * 60)
+        try:
+            exe_path = Path(sys.executable).resolve()
+            if project_root not in exe_path.parents:
+                logging.debug(" → warning: app interpreter is outside this bundle: %s", exe_path)
+                logging.debug(" → using helper interpreter: %s", helper_python)
+        except Exception:
+            pass
         logging.debug("SGS send: role=%s alias=%s host=%s", role, stb_name, target_name)
         logging.debug(" → IP=%s RID=%s CID=%s key=%s", target_ip, stb_rid, cid if cid else DEFAULT_CID, key_name)
         logging.debug(" → payload: %s", json.dumps(payload))
