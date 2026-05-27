@@ -45,8 +45,11 @@ from channel_surf_agent import ChannelSurfAgent  # noqa: E402
 from channel_metadata import extract_guide_grid  # noqa: E402
 from ppv_purchase_agent import PPVPurchaseAgent  # noqa: E402
 from human_playbooks import all_playbooks, playbooks_for_cues, backlog_from_graph  # noqa: E402
+from vlm_shadow_client import health as vlm_shadow_health, infer_image as vlm_shadow_infer  # noqa: E402
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
+from learning_dataset_writer import LearningDatasetWriter  # noqa: E402
+from vlm_remote_trainer import VLMRemoteJob, prepare_job_files, submit_job  # noqa: E402
 
 log = logging.getLogger("merged.app")
 
@@ -139,6 +142,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "crawler_transition_sample_limit": 30,
     "crawler_flow_lane_card_w": 280,
     "crawler_flow_lane_card_h": 190,
+    "vlm_shadow_enabled": True,
+    "vlm_shadow_url": "http://10.79.85.35:8765",
+    "vlm_shadow_timeout_s": 180,
+    "vlm_shadow_log_file": "vlm_shadow_log.jsonl",
+
+    "learning_dataset_dir": "learning_datasets",
+    "learning_dataset_image_max_width": 960,
+    "vlm_remote_host": "10.79.85.35",
+    "vlm_remote_user": "montjac",
+    "vlm_remote_root": "~/aBotTesty_vlm_jobs",
+    "vlm_default_model_3090": "Qwen/Qwen3-VL-8B-Instruct",
+    "vlm_default_model_3080": "Qwen/Qwen2.5-VL-7B-Instruct",
 }
 
 
@@ -705,6 +720,7 @@ def monitor_page() -> Response:
       <button class="secondary" onclick="window.location='/channel_surf'">Channel Surf</button>
       <button class="secondary" onclick="window.location='/ppv'">PPV Lab</button>
       <button class="secondary" onclick="window.location='/dashboards'">Dashboards</button>
+      <button class="secondary" onclick="window.location='/learning'">Learning/VLM</button>
     </p>
     <div class="card" style="padding:10px;margin:10px 0;background:#10171d">
       <h3 style="margin-top:0">Guide Intelligence</h3>
@@ -776,6 +792,72 @@ def api_status():
         channel_surf=channel_surf.status(),
     )
 
+
+
+def _vlm_shadow_append(row: Dict[str, Any]) -> None:
+    try:
+        path = CRAWLER_DIR / str(CFG.get("vlm_shadow_log_file", "vlm_shadow_log.jsonl"))
+        row = dict(row)
+        row.setdefault("ts", datetime.now().isoformat(timespec="seconds"))
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        log.exception("failed to append VLM shadow log")
+
+
+@app.route("/api/vlm/shadow/status")
+def api_vlm_shadow_status():
+    url = str(CFG.get("vlm_shadow_url", "http://10.79.85.35:8765"))
+    try:
+        return jsonify(ok=True, shadow=vlm_shadow_health(url, timeout_s=10.0), url=url)
+    except Exception as exc:
+        return jsonify(ok=False, error=str(exc), url=url), 503
+
+
+@app.route("/api/vlm/shadow/analyze", methods=["POST", "GET"])
+def api_vlm_shadow_analyze():
+    jpg = monitor.get_jpeg()
+    if not jpg:
+        return jsonify(ok=False, error="no active frame", video=monitor.get_status()), 503
+
+    data = request.get_json(silent=True) or {}
+    task = str(data.get("task") or request.args.get("task") or "perception")
+    goal = str(data.get("goal") or request.args.get("goal") or "explore the TV UI safely")
+    action = str(data.get("action") or request.args.get("action") or "")
+    url = str(data.get("server_url") or CFG.get("vlm_shadow_url", "http://10.79.85.35:8765"))
+    timeout_s = float(data.get("timeout_s") or CFG.get("vlm_shadow_timeout_s", 180))
+
+    try:
+        result = vlm_shadow_infer(jpg, task=task, goal=goal, action=action, server_url=url, timeout_s=timeout_s)
+        payload = {
+            "ok": True,
+            "mode": "shadow_only_no_remote_keys_pressed",
+            "task": task,
+            "goal": goal,
+            "action": action,
+            "result": result,
+            "video": monitor.get_status(),
+        }
+        _vlm_shadow_append(payload)
+        return jsonify(payload)
+    except Exception as exc:
+        log.exception("VLM shadow analyze failed")
+        payload = {"ok": False, "error": str(exc), "task": task, "url": url}
+        _vlm_shadow_append(payload)
+        return jsonify(payload), 500
+
+
+@app.route("/api/vlm/shadow/policy", methods=["POST", "GET"])
+def api_vlm_shadow_policy():
+    data = request.get_json(silent=True) or {}
+    data["task"] = "policy"
+    # Reuse the same implementation without executing any key.
+    with app.test_request_context(
+        "/api/vlm/shadow/analyze",
+        method="POST",
+        json=data,
+    ):
+        return api_vlm_shadow_analyze()
 
 @app.route("/api/active-video")
 @app.route("/api/input/active")
@@ -1257,6 +1339,105 @@ def api_guide_select():
         log.exception("guide select failed")
         return jsonify(ok=False, error=str(exc), query=query, channel=channel, video=monitor.get_status()), 500
 
+
+
+
+# ---------------------------------------------------------------------------
+# v37 Phase 1: multimodal learning dataset export + remote VLM training hooks
+# ---------------------------------------------------------------------------
+
+def _learning_writer() -> LearningDatasetWriter:
+    return LearningDatasetWriter(
+        root_dir=ROOT,
+        crawler_dir=CRAWLER_DIR,
+        out_dir=ROOT / str(CFG.get("learning_dataset_dir", "learning_datasets")),
+        image_max_width=int(CFG.get("learning_dataset_image_max_width", 960)),
+    )
+
+
+@app.route("/learning")
+def learning_page() -> Response:
+    return Response(
+        """
+<!doctype html><html><head><meta charset="utf-8"><title>aBotTesty v37 Learning Dataset</title>
+<style>body{background:#0d1117;color:#e5edf5;font-family:Segoe UI,Arial,sans-serif;margin:0}header{padding:14px 18px;background:#151b23}main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:14px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer;font-weight:700}button.warn{background:#b45309}input{background:#0b1016;color:#e5edf5;border:1px solid #3b4450;border-radius:8px;padding:8px;width:95%}pre{white-space:pre-wrap;word-break:break-word;color:#b6c2cf;max-height:560px;overflow:auto}</style></head>
+<body><header><b>v37 Phase 1 — Learning Dataset + Remote VLM Trainer</b> · <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a></header>
+<main><section class="card"><h2>Dataset exporter</h2><p>Exports before/action/after episodes plus VLM SFT JSONL files. This does not let a model control the STB.</p><input id="run_id" placeholder="optional run id"><br><br><button onclick="stats()">Stats</button><button onclick="exportData()">Export dataset</button><pre id="out">ready</pre></section>
+<section class="card"><h2>Remote 2x3090 trainer</h2><p>Default target: montjac@10.79.85.35. Dry-run first; execute only after SSH keys and dataset export are verified.</p><input id="dataset_dir" placeholder="dataset dir" value="learning_datasets/latest"><br><br><input id="model" value="Qwen/Qwen3-VL-8B-Instruct"><br><br><button onclick="planRemote()">Plan remote job</button><button onclick="submitRemote(false)">Submit dry-run</button><button class="warn" onclick="submitRemote(true)">Submit LIVE</button><pre id="remote">ready</pre></section></main>
+<script>
+async function api(u,b=null){const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{};const r=await fetch(u,opt);return await r.json()}
+async function stats(){out.textContent=JSON.stringify(await api('/api/learning/stats'),null,2)}
+async function exportData(){out.textContent='exporting...';out.textContent=JSON.stringify(await api('/api/learning/export',{run_id:run_id.value}),null,2)}
+async function planRemote(){remote.textContent=JSON.stringify(await api('/api/learning/remote/plan',{dataset_dir:dataset_dir.value,model:model.value}),null,2)}
+async function submitRemote(execute){remote.textContent=JSON.stringify(await api('/api/learning/remote/submit',{dataset_dir:dataset_dir.value,model:model.value,execute,dry_run:!execute}),null,2)}
+stats();
+</script></body></html>
+        """,
+        mimetype="text/html",
+    )
+
+
+@app.route("/api/learning/stats", methods=["GET"])
+def api_learning_stats():
+    try:
+        return jsonify(_learning_writer().stats())
+    except Exception as exc:
+        log.exception("learning stats failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/learning/export", methods=["POST", "GET"])
+def api_learning_export():
+    data = request.get_json(silent=True) or {}
+    try:
+        max_records = int(data.get("max_records") or request.args.get("max_records") or 0)
+        run_id = str(data.get("run_id") or request.args.get("run_id") or "").strip() or None
+        include_raw = str(data.get("include_raw", request.args.get("include_raw", "false"))).lower() in {"1", "true", "yes", "on"}
+        return jsonify(_learning_writer().export(run_id=run_id, max_records=max_records, include_raw=include_raw))
+    except Exception as exc:
+        log.exception("learning export failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+def _remote_job_from_request(data: Dict[str, Any]) -> VLMRemoteJob:
+    return VLMRemoteJob(
+        dataset_dir=str(data.get("dataset_dir") or ROOT / str(CFG.get("learning_dataset_dir", "learning_datasets")) / "latest"),
+        host=str(data.get("host") or CFG.get("vlm_remote_host", "10.79.85.35")),
+        user=str(data.get("user") or CFG.get("vlm_remote_user", "montjac")),
+        remote_root=str(data.get("remote_root") or CFG.get("vlm_remote_root", "~/aBotTesty_vlm_jobs")),
+        model_name=str(data.get("model") or CFG.get("vlm_default_model_3090", "Qwen/Qwen3-VL-8B-Instruct")),
+        run_name=str(data.get("run_name") or ""),
+        ssh_port=int(data.get("ssh_port") or 22),
+        dry_run=(bool(data.get("dry_run")) if "dry_run" in data else (not bool(data.get("execute", False)))),
+    )
+
+
+@app.route("/api/learning/remote/plan", methods=["POST", "GET"])
+def api_learning_remote_plan():
+    data = request.get_json(silent=True) or {}
+    try:
+        job = _remote_job_from_request(data)
+        hardware = str(data.get("hardware") or "2x3090")
+        out_dir = ROOT / "vlm_jobs" / job.run_name
+        plan = prepare_job_files(job, out_dir=out_dir, hardware=hardware)
+        return jsonify(ok=True, dry_run=True, plan=plan)
+    except Exception as exc:
+        log.exception("remote VLM plan failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/learning/remote/submit", methods=["POST"])
+def api_learning_remote_submit():
+    data = request.get_json(silent=True) or {}
+    try:
+        job = _remote_job_from_request(data)
+        hardware = str(data.get("hardware") or "2x3090")
+        out_dir = ROOT / "vlm_jobs" / job.run_name
+        prepare_job_files(job, out_dir=out_dir, hardware=hardware)
+        return jsonify(submit_job(job, prepared_dir=out_dir))
+    except Exception as exc:
+        log.exception("remote VLM submit failed")
+        return jsonify(ok=False, error=str(exc)), 500
 
 @app.route("/api/crawl/start", methods=["POST"])
 def api_crawl_start():

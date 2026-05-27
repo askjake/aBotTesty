@@ -188,36 +188,16 @@ def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str
 
     {bootstrap}
 
-    python -m pip install --upgrade pip wheel setuptools packaging
-    python -m pip uninstall -y torch torchvision torchaudio transformers accelerate datasets peft pillow llamafactory || true
-    python -m pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu121 torch torchvision torchaudio
-
-    cat > /tmp/abot_lf_constraints.txt <<'CONSTRAINTS'
-accelerate>=1.3.0,<=1.11.0
-datasets>=2.16.0,<=4.0.0
-peft>=0.18.0,<=0.18.1
-transformers>=4.55.0,<=5.6.0,!=4.52.0,!=4.57.0
-pillow>=8,<12
-CONSTRAINTS
-
-    python -m pip freeze | grep -E '^(torch|torchvision|torchaudio)==' >> /tmp/abot_lf_constraints.txt
-
-    python -m pip install --no-cache-dir \
-      --extra-index-url https://download.pytorch.org/whl/cu121 \
-      -c /tmp/abot_lf_constraints.txt \
-      "llamafactory @ git+https://github.com/hiyouga/LLaMA-Factory.git" \
-      bitsandbytes qwen-vl-utils tensorboard
-
-    python -m pip check || true
-    python - <<'PYTORCH_CHECK'
-import torch, torchaudio, transformers, accelerate, datasets, peft
+    echo "[v37.5] verifying training dependencies" | tee -a train.log
+    python - <<'PYDEPS' 2>&1 | tee -a train.log
+import torch, transformers, peft, bitsandbytes
 print("torch", torch.__version__, "cuda", torch.version.cuda, "cuda_available", torch.cuda.is_available(), "gpus", torch.cuda.device_count())
-print("torchaudio", torchaudio.__version__)
 print("transformers", transformers.__version__)
-print("accelerate", accelerate.__version__)
-print("datasets", datasets.__version__)
 print("peft", peft.__version__)
-PYTORCH_CHECK
+print("bitsandbytes", bitsandbytes.__version__)
+import peft.tuners.lora.bnb
+print("peft.tuners.lora.bnb import OK")
+PYDEPS
 
     rm -rf dataset dataset_registry
     mkdir -p dataset dataset_registry
@@ -225,9 +205,9 @@ PYTORCH_CHECK
     ln -sfn dataset/images images
 
     echo "[v37.4] extracted dataset tree" | tee -a train.log
-    find dataset -maxdepth 2 -type f | sort | head -80 | tee -a train.log
+    (find dataset -maxdepth 2 -type f | sort | head -80 | tee -a train.log) || true
     echo "[v37.4] image symlink:" | tee -a train.log
-    ls -lah images | tee -a train.log || true
+    (ls -lah images | tee -a train.log) || true
 
     python - <<'PY'
 import json
@@ -267,7 +247,8 @@ PY
 
     cp train_config.yaml effective_train_config.yaml
     echo "[v37.3] starting llamafactory-cli train" | tee -a train.log
-    CUDA_VISIBLE_DEVICES=0,1 llamafactory-cli train effective_train_config.yaml 2>&1 | tee -a train.log
+    CUDA_VISIBLE_DEVICES=0,1 echo "[v37.6] starting llamafactory-cli train" | tee -a train.log
+    llamafactory-cli train effective_train_config.yaml 2>&1 | tee -a train.log
     echo "[v37.3] training finished" | tee -a train.log
     """).strip() + "\n"
 
