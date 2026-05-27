@@ -520,7 +520,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:screen",
                     "image": screen_img,
                     "messages": [
-                        {"role": "user", "content": "Analyze this DISH/STB screen. Return compact JSON with screen_type, focused_element, selectable_options, risk_flags, and confidence."},
+                        {"role": "user", "content": "<image>\nAnalyze this DISH/STB screen. Return compact JSON with screen_type, focused_element, selectable_options, risk_flags, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._screen_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })
@@ -529,7 +529,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:policy",
                     "image": ep.before_image,
                     "messages": [
-                        {"role": "user", "content": f"Goal: {ep.goal or 'explore the TV UI safely'}. Given the current screen, choose the next safe remote action as JSON with action_sequence, expected_result, risk, and confidence."},
+                        {"role": "user", "content": f"<image>\nGoal: {ep.goal or 'explore the TV UI safely'}. Given the current screen, choose the next safe remote action as JSON with action_sequence, expected_result, risk, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._policy_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })
@@ -538,7 +538,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:verify",
                     "images": [ep.before_image, ep.after_image],
                     "messages": [
-                        {"role": "user", "content": f"The remote action was {ep.action_sequence or [ep.action]}. Did the after-screen satisfy the expected transition? Return JSON with success, evidence, correction, and confidence."},
+                        {"role": "user", "content": f"<image>\n<image>\nThe remote action was {ep.action_sequence or [ep.action]}. Did the after-screen satisfy the expected transition? Return JSON with success, evidence, correction, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._verify_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })

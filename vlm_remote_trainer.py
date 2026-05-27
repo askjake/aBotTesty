@@ -107,6 +107,7 @@ def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
     template: qwen2_vl
     dataset: abot_screen_perception
     dataset_dir: dataset_registry
+    media_dir: dataset
     cutoff_len: {cutoff}
     preprocessing_num_workers: 8
     output_dir: outputs/{job.run_name}
@@ -221,6 +222,12 @@ PYTORCH_CHECK
     rm -rf dataset dataset_registry
     mkdir -p dataset dataset_registry
     tar -xzf dataset.tar.gz -C dataset --strip-components=1
+    ln -sfn dataset/images images
+
+    echo "[v37.4] extracted dataset tree" | tee -a train.log
+    find dataset -maxdepth 2 -type f | sort | head -80 | tee -a train.log
+    echo "[v37.4] image symlink:" | tee -a train.log
+    ls -lah images | tee -a train.log || true
 
     python - <<'PY'
 import json
