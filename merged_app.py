@@ -33,6 +33,7 @@ os.environ.setdefault("JAMBOREE_BASE", str(ROOT / "base.txt"))
 from flask import Response, abort, jsonify, request, send_file  # noqa: E402
 
 from capture_monitor import CaptureMonitor  # noqa: E402
+import cv2  # noqa: E402
 from auto_crawler import AutonomousCrawler, CrawlerConfig  # noqa: E402
 from focus_detector import detect_focus, draw_focus_overlay  # noqa: E402
 from parental_control_agent import ParentalControlAgent  # noqa: E402
@@ -119,7 +120,12 @@ CFG = load_config()
 if os.getenv("MERGED_SERVER_PORT"):
     CFG["server_port"] = int(os.getenv("MERGED_SERVER_PORT", CFG["server_port"]))
 if os.getenv("MERGED_CAPTURE_DEVICE"):
-    CFG["capture_device"] = int(os.getenv("MERGED_CAPTURE_DEVICE", CFG["capture_device"]))
+    _dev = os.getenv("MERGED_CAPTURE_DEVICE", str(CFG["capture_device"]))
+    # Keep as string if it looks like a URL, otherwise convert to int (device index)
+    try:
+        CFG["capture_device"] = int(_dev) if not _dev.startswith(("rtsp://", "rtmp://", "http://", "https://")) else _dev
+    except ValueError:
+        CFG["capture_device"] = _dev  # Keep as string (URL or path)
 SNAPSHOT_DIR = (ROOT / str(CFG["snapshot_dir"])).resolve()
 LOG_DIR = (ROOT / str(CFG["log_dir"])).resolve()
 CRAWLER_DIR = (ROOT / str(CFG["crawler_dir"])).resolve()
@@ -144,6 +150,9 @@ monitor = CaptureMonitor(
     signal_min_brightness=float(CFG["signal_min_brightness"]),
     signal_min_variance=float(CFG["signal_min_variance"]),
     motion_threshold=float(CFG["motion_threshold"]),
+    rtsp_reconnect_delay=2.0,
+    rtsp_tcp_transport=True,
+    source_label="Configured input",
 )
 
 # Start monitoring immediately; /monitor/stop can pause it.
@@ -1491,9 +1500,180 @@ def api_self_test():
     return jsonify(ok=all(checks.values()), checks=checks, video=monitor.get_status(), stb=store.get(alias))
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v36 Multi-Input RTSP Switcher API
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/capture/inputs", methods=["GET"])
+def api_capture_inputs():
+    """List available capture inputs (local devices + known RTSP streams)."""
+    import platform
+    inputs = []
+
+    # Scan local devices (0-9)
+    backend_cv = cv2.CAP_DSHOW if platform.system().lower() == "windows" else cv2.CAP_ANY
+    for i in range(10):
+        try:
+            cap = cv2.VideoCapture(i, backend_cv)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size:
+                    inputs.append({
+                        "device": i,
+                        "type": "local",
+                        "label": f"Local device {i} ({frame.shape[1]}x{frame.shape[0]})",
+                        "resolution": f"{frame.shape[1]}x{frame.shape[0]}",
+                    })
+                cap.release()
+        except Exception:
+            pass
+
+    # Add configured RTSP source if present
+    dev = CFG.get("capture_device")
+    if isinstance(dev, str) and dev.startswith(("rtsp://", "rtmp://", "http://", "https://")):
+        inputs.append({
+            "device": dev,
+            "type": "rtsp",
+            "label": f"RTSP Encoder ({dev})",
+            "resolution": "auto",
+        })
+
+    # Add from MERGED_RTSP_URL env if set
+    rtsp_env = os.environ.get("MERGED_RTSP_URL")
+    if rtsp_env and rtsp_env != dev:
+        inputs.append({
+            "device": rtsp_env,
+            "type": "rtsp",
+            "label": f"RTSP (env) ({rtsp_env})",
+            "resolution": "auto",
+        })
+
+    # Include current active source
+    status = monitor.get_status()
+    return jsonify(
+        inputs=inputs,
+        active={
+            "device": monitor.device,
+            "type": status.get("device_type", "unknown"),
+            "label": status.get("source_label", ""),
+            "status": status.get("status"),
+            "resolution": f"{status.get('width', 0)}x{status.get('height', 0)}",
+        },
+    )
+
+
+@app.route("/api/capture/select", methods=["POST"])
+def api_capture_select():
+    """Switch the active capture input at runtime."""
+    import threading as _th
+    data = request.get_json(force=True) if request.is_json else request.form.to_dict()
+    device = data.get("device")
+    if device is None:
+        abort(400, description="Missing 'device' field (int index or URL string)")
+
+    # Coerce to int if it looks like a number
+    try:
+        device = int(device)
+    except (ValueError, TypeError):
+        pass  # keep as string (URL)
+
+    backend = data.get("backend")
+    width = int(data["width"]) if "width" in data else None
+    height = int(data["height"]) if "height" in data else None
+    label = data.get("label")
+
+    def _do_switch():
+        try:
+            monitor.switch_source(
+                device=device,
+                backend=backend,
+                width=width,
+                height=height,
+                label=label,
+            )
+            log.info("Capture switched to %r", device)
+        except Exception as exc:
+            log.exception("switch_source failed for %r: %s", device, exc)
+
+    _th.Thread(target=_do_switch, daemon=True).start()
+    return jsonify(ok=True, switching_to=str(device), message="Switch initiated, check /screen for status")
+
+
+@app.route("/api/capture/scan", methods=["GET", "POST"])
+def api_capture_scan():
+    """Scan for available capture sources (can be slow)."""
+    import platform
+    results = []
+    backend_cv = cv2.CAP_DSHOW if platform.system().lower() == "windows" else cv2.CAP_ANY
+
+    for i in range(10):
+        try:
+            cap = cv2.VideoCapture(i, backend_cv)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                ok, frame = cap.read()
+                results.append({
+                    "device": i,
+                    "type": "local",
+                    "available": True,
+                    "has_frame": bool(ok and frame is not None and frame.size),
+                    "resolution": f"{frame.shape[1]}x{frame.shape[0]}" if ok and frame is not None else None,
+                })
+                cap.release()
+            else:
+                results.append({"device": i, "type": "local", "available": False})
+        except Exception:
+            results.append({"device": i, "type": "local", "available": False})
+
+    # Test configured RTSP if present
+    dev = CFG.get("capture_device")
+    if isinstance(dev, str) and dev.startswith(("rtsp://", "rtmp://", "http://", "https://")):
+        try:
+            cap = cv2.VideoCapture(dev, cv2.CAP_FFMPEG)
+            opened = cap.isOpened()
+            ok, frame = (False, None)
+            if opened:
+                ok, frame = cap.read()
+            results.append({
+                "device": dev,
+                "type": "rtsp",
+                "available": opened,
+                "has_frame": bool(ok and frame is not None),
+                "resolution": f"{frame.shape[1]}x{frame.shape[0]}" if ok and frame is not None else None,
+            })
+            cap.release()
+        except Exception as e:
+            results.append({"device": dev, "type": "rtsp", "available": False, "error": str(e)})
+
+    return jsonify(results=results)
+
+
+def _find_available_port(host: str, start_port: int, max_attempts: int = 20) -> int:
+    """Find the next available TCP port starting from start_port."""
+    import socket
+    for offset in range(max_attempts):
+        port = start_port + offset
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, port))
+                return port
+        except OSError:
+            log.debug("Port %d in use, trying next...", port)
+            continue
+    raise RuntimeError(f"No available port found in range {start_port}-{start_port + max_attempts - 1}")
+
+
 def main() -> None:
     host = str(CFG["server_host"])
-    port = int(CFG["server_port"])
+    preferred_port = int(CFG["server_port"])
+    port = _find_available_port(host, preferred_port)
+    if port != preferred_port:
+        log.warning("Port %d in use \u2014 using next available: %d", preferred_port, port)
     log.info("Merged app starting on http://%s:%s/monitor", host, port)
     log.info("JAMBOREE_BASE=%s", os.environ.get("JAMBOREE_BASE"))
     log.info("Controlling STB alias=%s via remote=%s", CFG["stb_alias"], CFG["remote"])
