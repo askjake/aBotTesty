@@ -105,7 +105,7 @@ def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
     finetuning_type: lora
     lora_target: all
     template: qwen2_vl
-    dataset: abot_screen_perception
+    dataset: abot_screen_perception,abot_action_policy,abot_outcome_verifier
     dataset_dir: dataset_registry
     media_dir: dataset
     cutoff_len: {cutoff}
