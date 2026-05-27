@@ -1,0 +1,31 @@
+# Langchain
+langchain==0.3.26
+langchain-community==0.3.26
+langchain-aws==0.2.27
+langgraph==0.5.3
+langgraph-checkpoint-postgres==2.0.21
+psycopg[binary,pool]==3.2.9
+langchain-mcp-adapters==0.1.11
+
+# Document processing
+docx2txt==0.9
+pdfminer.six==20250506
+
+# FastAPI
+fastapi[all]==0.115.14
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+alembic==1.16.2
+
+# Postgresql
+sqlalchemy[asyncio]==2.0.41
+asyncpg==0.30.0
+
+# Python
+argon2-cffi==25.1.0
+pycryptodome==3.23.0
+pytest==8.4.1
+pillow==11.2.1
+
+transformers==4.53.0

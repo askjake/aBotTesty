@@ -159,7 +159,8 @@ class ManualTeachingRecorder:
         before_summary = self.crawler._state_summary(before_id)
         after_summary = self.crawler._state_summary(after_id)
         return {
-            "source": "manual_teaching_fast" if timing_debug.get("mode") == "burst_checkpoint" else "manual_teaching",
+            "source": timing_debug.get("source") or ("manual_teaching_fast" if timing_debug.get("mode") == "burst_checkpoint" else "manual_teaching"),
+            "operator_auto": bool(timing_debug.get("operator_auto", False)),
             "session_id": session_id, "note": note or "",
             "before_state": before_id, "after_state": after_id, "button": str(requested_key), "button_sequence": self.crawler._action_sequence_for_display(str(requested_key)),
             "before": {**before_summary, "screenshot": before_fp.screenshot, "ocr_text": before_fp.ocr_text, "ocr_tokens": before_fp.ocr_tokens, "focus": before_fp.focus, "focus_label": self.crawler.focus_label(before_fp), "phash": before_fp.phash, "brightness": before_fp.brightness, "entropy": before_fp.entropy},
@@ -180,8 +181,11 @@ class ManualTeachingRecorder:
         edge_key = self.crawler.graph.edge_key(before_id, str(requested_key), after_id)
         edge_existed = edge_key in self.crawler.graph.edges
         reward, reward_details = self.crawler.brain.score_observation(cfg, str(requested_key), before_fp, after_fp, created=created, changed=changed)
-        reward += 8.0
-        reward_details["manual_demonstration_reward"] = 8.0
+        demonstration_bonus = 12.0 if timing_debug.get("operator_auto") else 8.0
+        reward += demonstration_bonus
+        reward_details["manual_demonstration_reward"] = demonstration_bonus
+        if timing_debug.get("operator_auto"):
+            reward_details["operator_customer_path_weight"] = demonstration_bonus
         if changed and not edge_existed:
             reward += cfg.reward_new_edge
             reward_details["new_edge_reward"] = cfg.reward_new_edge
@@ -192,6 +196,13 @@ class ManualTeachingRecorder:
         edge = self.crawler.graph.record_edge(before_id, str(requested_key), after_id, changed=changed, success=True, confidence=confidence, sample=sample)
         stat = self.crawler.brain.update_state_action(before_id, str(requested_key), after_id, reward, True, not changed, bool(created or not edge_existed or reward_details.get("new_tokens") or reward_details.get("new_screen_title") or reward_details.get("new_setting_pairs")))
         self.crawler.brain.update_reward(str(requested_key), 8.0)
+        try:
+            src = str((timing_debug or {}).get("source") or "manual_teaching")
+            weight = 3.5 if (timing_debug or {}).get("operator_auto") else 2.5
+            self.crawler.sequence_learner.record_action(before_id, str(requested_key), after_id, reward=reward, time_s=float((timing_debug or {}).get("response_s") or 0.0), source=src, weight=weight)
+            self.crawler.sequence_learner.mine_sequences(min_occurrences=2, min_avg_reward=2.0)
+        except Exception:
+            log.debug("manual demonstration sequence learner update failed", exc_info=True)
         self.crawler.graph.save(); self.crawler.brain.save()
         before_summary = self.crawler._state_summary(before_id); after_summary = self.crawler._state_summary(after_id)
         event = {"ts": self.now(), "type": "button_transition", "button": str(requested_key), "before_state": before_id, "after_state": after_id, "before_label": before_summary.get("label"), "after_label": after_summary.get("label"), "before_focus": self.crawler.focus_label(before_fp), "after_focus": self.crawler.focus_label(after_fp), "changed": changed, "created_state": created, "new_edge": not edge_existed, "confidence": round(float(edge.confidence),4), "reward": round(float(reward),4), "response_s": round(float((timing_debug or {}).get("response_s", 0.0)),3), "note": note or ""}
@@ -205,7 +216,7 @@ class ManualTeachingRecorder:
         log.info("manual teaching transition learned %s", event)
         return {"ok": True, "recorded": True, "session_id": session_id, "event": event, "edge": asdict(edge), "state_action": asdict(stat), "sample": sample}
 
-    def record_button_fast(self, requested_key: str, delay_ms: Optional[int] = None, gap_s: float = 0.075, note: str = "") -> Dict[str, Any]:
+    def record_button_fast(self, requested_key: str, delay_ms: Optional[int] = None, gap_s: float = 0.075, note: str = "", operator_auto: bool = False, source: str = "manual_teaching_fast") -> Dict[str, Any]:
         """Send immediately and learn a burst transition after the operator pauses.
 
         This is the v14 teacher mode: button pressing stays human-fast, while
@@ -223,7 +234,7 @@ class ManualTeachingRecorder:
                 self._active["events"].append({"ts": self.now(), "type": "button_sent_pending", "button": str(requested_key), "before_state": before_id, "fast": True})
         with self._burst_lock:
             if self._burst is None:
-                self._burst = {"session_id": session_id, "before_id": before_id, "before_fp": before_fp, "keys": [], "send_results": [], "note": note or "", "t0": t0}
+                self._burst = {"session_id": session_id, "before_id": before_id, "before_fp": before_fp, "keys": [], "send_results": [], "note": note or "", "t0": t0, "operator_auto": bool(operator_auto), "source": source}
             self._burst["keys"].append(str(requested_key))
             self._burst["send_results"].append(send_result)
             if note:
@@ -253,7 +264,7 @@ class ManualTeachingRecorder:
             keys = [str(k) for k in burst.get("keys", [])]
             action = keys[0] if len(keys) == 1 else ",".join(keys)
             send_result = {"ok": True, "burst": True, "sent": burst.get("send_results", []), "count": len(keys)}
-            timing_debug = {"mode": "burst_checkpoint", "response_s": round(time.time() - float(burst.get("t0") or time.time()), 3), "keys": keys}
+            timing_debug = {"mode": "burst_checkpoint", "response_s": round(time.time() - float(burst.get("t0") or time.time()), 3), "keys": keys, "operator_auto": bool(burst.get("operator_auto", False)), "source": str(burst.get("source") or "manual_teaching_fast")}
             return self._learn_transition(str(burst["session_id"]), action, str(burst["before_id"]), burst["before_fp"], after_fp, send_result, str(burst.get("note") or ""), float(burst.get("t0") or time.time()), timing_debug)
         except Exception as exc:
             self._last_error = str(exc)
@@ -281,8 +292,11 @@ class ManualTeachingRecorder:
         edge_key = self.crawler.graph.edge_key(before_id, str(requested_key), after_id)
         edge_existed = edge_key in self.crawler.graph.edges
         reward, reward_details = self.crawler.brain.score_observation(cfg, str(requested_key), before_fp, after_fp, created=created, changed=changed)
-        reward += 8.0
-        reward_details["manual_demonstration_reward"] = 8.0
+        demonstration_bonus = 12.0 if timing_debug.get("operator_auto") else 8.0
+        reward += demonstration_bonus
+        reward_details["manual_demonstration_reward"] = demonstration_bonus
+        if timing_debug.get("operator_auto"):
+            reward_details["operator_customer_path_weight"] = demonstration_bonus
         if changed and not edge_existed:
             reward += cfg.reward_new_edge
             reward_details["new_edge_reward"] = cfg.reward_new_edge
@@ -307,6 +321,13 @@ class ManualTeachingRecorder:
         edge = self.crawler.graph.record_edge(before_id, str(requested_key), after_id, changed=changed, success=True, confidence=confidence, sample=sample)
         stat = self.crawler.brain.update_state_action(before_id, str(requested_key), after_id, reward, True, not changed, bool(created or not edge_existed or reward_details.get("new_tokens") or reward_details.get("new_screen_title") or reward_details.get("new_setting_pairs")))
         self.crawler.brain.update_reward(str(requested_key), 8.0)
+        try:
+            src = str((timing_debug or {}).get("source") or "manual_teaching")
+            weight = 3.5 if (timing_debug or {}).get("operator_auto") else 2.5
+            self.crawler.sequence_learner.record_action(before_id, str(requested_key), after_id, reward=reward, time_s=float((timing_debug or {}).get("response_s") or 0.0), source=src, weight=weight)
+            self.crawler.sequence_learner.mine_sequences(min_occurrences=2, min_avg_reward=2.0)
+        except Exception:
+            log.debug("manual demonstration sequence learner update failed", exc_info=True)
         self.crawler.graph.save(); self.crawler.brain.save()
         event = {"ts": self.now(), "type": "button_transition", "button": str(requested_key), "before_state": before_id, "after_state": after_id, "before_label": before_summary.get("label"), "after_label": after_summary.get("label"), "before_focus": self.crawler.focus_label(before_fp), "after_focus": self.crawler.focus_label(after_fp), "changed": changed, "created_state": created, "new_edge": not edge_existed, "confidence": round(float(edge.confidence),4), "reward": round(float(reward),4), "response_s": round(float(response_s),3), "note": note or ""}
         with self._lock:

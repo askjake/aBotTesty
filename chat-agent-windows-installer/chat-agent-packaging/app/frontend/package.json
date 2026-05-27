@@ -1,0 +1,51 @@
+{
+  "name": "dish-chat-app",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@10.10.0",
+  "workspaces": [
+    "apps/*",
+    "shared/*"
+  ],
+  "scripts": {
+    "build": "turbo build",
+    "dev": "turbo dev",
+    "lint": "turbo lint",
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "test": "jest --config ./shared/jest-config/jest.config.ts",
+    "test:ui": "jest --selectProjects  shared --config ./shared/jest-config/jest.config.ts",
+    "test:chats": "jest --selectProjects chats --config ./shared/jest-config/jest.config.ts",
+    "test:reports": "jest --selectProjects beta-reports --config ./shared/jest-config/jest.config.ts",
+    "test:watch": "jest --config ./shared/jest-config/jest.config.ts --watch"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "npm test --findRelatedTests --passWithNoTests"
+    ]
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@shared/eslint-config": "workspace:*",
+    "@shared/jest-config": "workspace:*",
+    "@shared/typescript-config": "workspace:*",
+    "@types/jest": "^30.0.0",
+    "husky": "^9.1.7",
+    "jest": "^30.2.0",
+    "lint-staged": "^16.2.7",
+    "prettier": "^3.7.4",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.2",
+    "turbo": "^2.6.3",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "overrides": {
+      "cookie": ">=0.7.0",
+      "brace-expansion": ">=2.0.1",
+      "minimatch": "^10.1.1"
+    }
+  }
+}
