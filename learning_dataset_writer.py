@@ -193,6 +193,13 @@ class LearningDatasetWriter:
         teacher_events = 0
         channel_observations = 0
         image_refs = 0
+        state_image_files = 0
+        state_dir = self.crawler_dir / "states"
+        if state_dir.exists():
+            state_image_files = len([
+                x for x in state_dir.iterdir()
+                if x.is_file() and x.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+            ])
         for p in artifacts.get("nav_graph", [])[:3]:
             data = read_json(Path(p), {}) or {}
             transitions += len(as_list(data.get("transitions"))) + len(as_list(data.get("edges")))
@@ -215,6 +222,7 @@ class LearningDatasetWriter:
             "teacher_events": teacher_events,
             "channel_surf_observations": channel_observations,
             "image_references_seen": image_refs,
+            "state_image_files": state_image_files,
             "artifacts": artifacts,
         }
 
@@ -282,6 +290,11 @@ class LearningDatasetWriter:
             emitted += 1
             if max_records and emitted >= max_records:
                 return
+        for ep in self._episodes_from_state_images(out_dir, offset=emitted):
+            yield ep
+            emitted += 1
+            if max_records and emitted >= max_records:
+                return
         for ep in self._episodes_from_channel_surf(artifacts.get("channel_surf", []), out_dir, offset=emitted):
             yield ep
             emitted += 1
@@ -330,12 +343,26 @@ class LearningDatasetWriter:
                 before_node = state_idx.get(before_id, {})
                 after_node = state_idx.get(after_id, {})
                 before_img = self._copy_image(
-                    first_present(rec.get("before_screenshot"), rec.get("before_image"), before_node.get("screenshot"), before_node.get("image"), before_node.get("image_path")),
+                    first_present(
+                        rec.get("before_screenshot"),
+                        rec.get("before_image"),
+                        before_node.get("screenshot"),
+                        before_node.get("image"),
+                        before_node.get("image_path"),
+                        self._state_image_source(before_id, state_idx, preferred="before"),
+                    ),
                     out_dir,
                     prefix=f"nav_{i:06d}_before",
                 )
                 after_img = self._copy_image(
-                    first_present(rec.get("after_screenshot"), rec.get("after_image"), after_node.get("screenshot"), after_node.get("image"), after_node.get("image_path")),
+                    first_present(
+                        rec.get("after_screenshot"),
+                        rec.get("after_image"),
+                        after_node.get("screenshot"),
+                        after_node.get("image"),
+                        after_node.get("image_path"),
+                        self._state_image_source(after_id, state_idx, preferred="after"),
+                    ),
                     out_dir,
                     prefix=f"nav_{i:06d}_after",
                 )
@@ -433,8 +460,14 @@ class LearningDatasetWriter:
                     local_step += 1
                     pending = None
 
-    def _state_image_source(self, state_id: Any, state_idx: Optional[Dict[str, Dict[str, Any]]] = None) -> Any:
-        """Resolve a screenshot/image path for a learned state id."""
+    def _state_image_source(self, state_id: Any, state_idx: Optional[Dict[str, Dict[str, Any]]] = None, preferred: str = "") -> Any:
+        """Resolve a screenshot/image path for a learned state id.
+
+        Auto-crawler screenshots are usually named before_<stateid>_timestamp.jpg,
+        after_<stateid>_timestamp.jpg, after_complete_<stateid>_timestamp.jpg,
+        or operator_before/operator_after timestamp pairs.  Older resolver logic
+        only checked <stateid>*.jpg, which missed almost all auto-crawler images.
+        """
         sid = str(state_id or "").strip()
         if not sid:
             return ""
@@ -458,16 +491,121 @@ class LearningDatasetWriter:
             self.root_dir / "crawler_data" / "states",
             self.root_dir / "states",
         ]
+        pref = str(preferred or "").lower().strip()
+        candidates: List[Path] = []
         for root in roots:
             if not root.exists():
                 continue
-            matches = []
             for ext in ("jpg", "jpeg", "png", "webp"):
-                matches.extend(root.glob(f"{sid}*.{ext}"))
-            if matches:
-                matches.sort(key=lambda x: x.stat().st_mtime if x.exists() else 0, reverse=True)
-                return str(matches[0])
-        return ""
+                candidates.extend(root.glob(f"*{sid}*.{ext}"))
+
+        if not candidates:
+            return ""
+
+        def score(path: Path) -> Tuple[int, float]:
+            name = path.name.lower()
+            rank = 10
+            if pref == "before":
+                if name.startswith("before_") or name.startswith("operator_before_"):
+                    rank = 0
+                elif "before" in name:
+                    rank = 1
+                elif name.startswith("after_") or "after" in name:
+                    rank = 5
+            elif pref == "after":
+                if name.startswith("after_complete_"):
+                    rank = 0
+                elif name.startswith("after_") or name.startswith("operator_after_"):
+                    rank = 1
+                elif "after" in name:
+                    rank = 2
+                elif name.startswith("before_") or "before" in name:
+                    rank = 5
+            else:
+                if name.startswith(("after_complete_", "after_", "before_", "operator_after_", "operator_before_")):
+                    rank = 1
+            try:
+                mt = -path.stat().st_mtime
+            except Exception:
+                mt = 0.0
+            return (rank, mt)
+
+        candidates = [p for p in candidates if p.is_file()]
+        candidates.sort(key=score)
+        return str(candidates[0]) if candidates else ""
+
+
+
+    def _episodes_from_state_images(self, out_dir: Path, offset: int = 0) -> Iterator[LearningEpisode]:
+        """Turn saved auto-crawler/operator screenshots into screen-perception samples.
+
+        These image-only episodes do not teach actions by themselves. They expand
+        the screen-perception set so the VLM learns live video, guide, menu, ads,
+        loading states, no-op screens, and recovery anchors observed by crawler runs.
+        """
+        state_dir = self.crawler_dir / "states"
+        if not state_dir.exists():
+            return
+
+        images = [
+            p for p in state_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        ]
+        images.sort(key=lambda p: (p.stat().st_mtime if p.exists() else 0, p.name))
+
+        for i, img in enumerate(images):
+            stem = img.stem
+            low = stem.lower()
+
+            role = "state"
+            if low.startswith("before_") or low.startswith("operator_before_"):
+                role = "before"
+            elif low.startswith("after_complete_"):
+                role = "after_complete"
+            elif low.startswith("after_") or low.startswith("operator_after_"):
+                role = "after"
+            elif low.startswith("teach_start_"):
+                role = "teach_start"
+
+            # Best-effort state id extraction. Keep the full stem as label too.
+            state_id = stem
+            for prefix in (
+                "operator_before_", "operator_after_",
+                "after_complete_", "after_deep_",
+                "before_", "after_", "teach_start_",
+            ):
+                if state_id.startswith(prefix):
+                    state_id = state_id[len(prefix):]
+                    break
+            state_id = re.split(r"_20\d{6}_", state_id)[0]
+
+            copied = self._copy_image(str(img), out_dir, f"state_{i:06d}_{role}")
+            if not copied:
+                continue
+
+            quality_flags = ["auto_crawler_state_image", "image_only_no_action"]
+            if role in {"before", "after", "after_complete"}:
+                quality_flags.append(f"transition_role_{role}")
+            if low.startswith("operator_"):
+                quality_flags.append("operator_auto_learning_image")
+
+            yield LearningEpisode(
+                episode_id=f"state_image_{i:06d}_{slug(stem, 36)}",
+                source="crawler_state_image",
+                step_index=offset + i,
+                task="screen_perception",
+                goal="learn screen appearance from auto-crawler saved state image",
+                before_state_id=state_id if role == "before" else "",
+                after_state_id=state_id if role != "before" else "",
+                after_image=copied,
+                after_label=stem,
+                confidence=0.25,
+                changed=False,
+                success_label=False,
+                risk_flags=[],
+                quality_flags=quality_flags,
+                raw={"image": str(img), "role": role, "state_id_guess": state_id} if self.include_raw else {},
+            )
 
 
     def _episodes_from_channel_surf(self, paths: List[str], out_dir: Path, offset: int = 0) -> Iterator[LearningEpisode]:
