@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Remote VLM training job helper for aBotTesty.
 
-v37.1 fixes two field issues found during first setup:
+v37.3 fixes remote submit/live training issues found during first setup:
 - LLaMA-Factory currently requires Python >=3.11, so remote scripts no longer use
   whatever `python3` happens to be when that is 3.10.
 - SSH mkdir and rsync now use an absolute remote directory instead of a quoted
@@ -98,7 +98,7 @@ def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
     grad_accum = 16 if "3090" in hardware else 24
     quant = 4
     return textwrap.dedent(f"""
-    # aBotTesty v37.1 VLM LoRA training config
+    # aBotTesty v37.3 VLM LoRA training config
     model_name_or_path: {job.model_name}
     stage: sft
     do_train: true
@@ -181,8 +181,8 @@ def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str
     return textwrap.dedent(f"""
     #!/usr/bin/env bash
     set -Eeuo pipefail
-    echo "[v37.1] remote train job: {job.run_name}" | tee train.log
-    echo "[v37.1] model: {job.model_name}" | tee -a train.log
+    echo "[v37.3] remote train job: {job.run_name}" | tee train.log
+    echo "[v37.3] model: {job.model_name}" | tee -a train.log
     nvidia-smi | tee -a train.log || true
 
     {bootstrap}
@@ -196,33 +196,46 @@ def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str
     mkdir -p dataset dataset_registry
     tar -xzf dataset.tar.gz -C dataset --strip-components=1
 
-    cat > dataset_registry/dataset_info.json <<'JSON'
-    {{
-      "abot_screen_perception": {{
+    python - <<'PY'
+import json
+from pathlib import Path
+info = {{
+    "abot_screen_perception": {{
         "file_name": "../dataset/sft/screen_perception.jsonl",
         "formatting": "sharegpt",
         "columns": {{"messages": "messages", "images": "image"}},
-        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}}
-      }},
-      "abot_action_policy": {{
+        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}},
+    }},
+    "abot_action_policy": {{
         "file_name": "../dataset/sft/action_policy.jsonl",
         "formatting": "sharegpt",
         "columns": {{"messages": "messages", "images": "image"}},
-        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}}
-      }},
-      "abot_outcome_verifier": {{
+        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}},
+    }},
+    "abot_outcome_verifier": {{
         "file_name": "../dataset/sft/outcome_verifier.jsonl",
         "formatting": "sharegpt",
         "columns": {{"messages": "messages", "images": "images"}},
-        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}}
-      }}
-    }}
-    JSON
+        "tags": {{"role_tag": "role", "content_tag": "content", "user_tag": "user", "assistant_tag": "assistant"}},
+    }},
+}}
+Path("dataset_registry/dataset_info.json").write_text(json.dumps(info, indent=2) + "\\n", encoding="utf-8")
+print("dataset_info_ok", Path("dataset_registry/dataset_info.json").resolve())
+PY
+
+    echo "[v37.3] dataset quick check" | tee -a train.log
+    python - <<'PY' 2>&1 | tee -a train.log
+from pathlib import Path
+for rel in ["sft/screen_perception.jsonl", "sft/action_policy.jsonl", "sft/outcome_verifier.jsonl"]:
+    p = Path("dataset") / rel
+    n = sum(1 for _ in p.open("r", encoding="utf-8")) if p.exists() else 0
+    print(rel, n)
+PY
 
     cp train_config.yaml effective_train_config.yaml
-    echo "[v37.1] starting llamafactory-cli train" | tee -a train.log
+    echo "[v37.3] starting llamafactory-cli train" | tee -a train.log
     CUDA_VISIBLE_DEVICES=0,1 llamafactory-cli train effective_train_config.yaml 2>&1 | tee -a train.log
-    echo "[v37.1] training finished" | tee -a train.log
+    echo "[v37.3] training finished" | tee -a train.log
     """).strip() + "\n"
 
 

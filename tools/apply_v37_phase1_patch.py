@@ -44,13 +44,13 @@ def learning_page() -> Response:
 <style>body{background:#0d1117;color:#e5edf5;font-family:Segoe UI,Arial,sans-serif;margin:0}header{padding:14px 18px;background:#151b23}main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:14px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer;font-weight:700}button.warn{background:#b45309}input{background:#0b1016;color:#e5edf5;border:1px solid #3b4450;border-radius:8px;padding:8px;width:95%}pre{white-space:pre-wrap;word-break:break-word;color:#b6c2cf;max-height:560px;overflow:auto}</style></head>
 <body><header><b>v37 Phase 1 — Learning Dataset + Remote VLM Trainer</b> · <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a></header>
 <main><section class="card"><h2>Dataset exporter</h2><p>Exports before/action/after episodes plus VLM SFT JSONL files. This does not let a model control the STB.</p><input id="run_id" placeholder="optional run id"><br><br><button onclick="stats()">Stats</button><button onclick="exportData()">Export dataset</button><pre id="out">ready</pre></section>
-<section class="card"><h2>Remote 2x3090 trainer</h2><p>Default target: montjac@10.79.85.35. Dry-run first; execute only after SSH keys and dataset export are verified.</p><input id="dataset_dir" placeholder="dataset dir" value="learning_datasets/latest"><br><br><input id="model" value="Qwen/Qwen3-VL-8B-Instruct"><br><br><button onclick="planRemote()">Plan remote job</button><button class="warn" onclick="submitRemote(false)">Submit dry-run</button><pre id="remote">ready</pre></section></main>
+<section class="card"><h2>Remote 2x3090 trainer</h2><p>Default target: montjac@10.79.85.35. Dry-run first; execute only after SSH keys and dataset export are verified.</p><input id="dataset_dir" placeholder="dataset dir" value="learning_datasets/latest"><br><br><input id="model" value="Qwen/Qwen3-VL-8B-Instruct"><br><br><button onclick="planRemote()">Plan remote job</button><button onclick="submitRemote(false)">Submit dry-run</button><button class="warn" onclick="submitRemote(true)">Submit LIVE</button><pre id="remote">ready</pre></section></main>
 <script>
 async function api(u,b=null){const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{};const r=await fetch(u,opt);return await r.json()}
 async function stats(){out.textContent=JSON.stringify(await api('/api/learning/stats'),null,2)}
 async function exportData(){out.textContent='exporting...';out.textContent=JSON.stringify(await api('/api/learning/export',{run_id:run_id.value}),null,2)}
 async function planRemote(){remote.textContent=JSON.stringify(await api('/api/learning/remote/plan',{dataset_dir:dataset_dir.value,model:model.value}),null,2)}
-async function submitRemote(execute){remote.textContent=JSON.stringify(await api('/api/learning/remote/submit',{dataset_dir:dataset_dir.value,model:model.value,execute}),null,2)}
+async function submitRemote(execute){remote.textContent=JSON.stringify(await api('/api/learning/remote/submit',{dataset_dir:dataset_dir.value,model:model.value,execute,dry_run:!execute}),null,2)}
 stats();
 </script></body></html>
         """,
@@ -89,7 +89,7 @@ def _remote_job_from_request(data: Dict[str, Any]) -> VLMRemoteJob:
         model_name=str(data.get("model") or CFG.get("vlm_default_model_3090", "Qwen/Qwen3-VL-8B-Instruct")),
         run_name=str(data.get("run_name") or ""),
         ssh_port=int(data.get("ssh_port") or 22),
-        dry_run=not bool(data.get("execute", False)),
+        dry_run=(bool(data.get("dry_run")) if "dry_run" in data else (not bool(data.get("execute", False)))),
     )
 
 
