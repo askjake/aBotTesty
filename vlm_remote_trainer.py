@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Remote VLM training job helper for aBotTesty.
 
-Phase 1 does not train inside the Flask app.  It packages an exported dataset and
-submits it to a GPU host over SSH/rsync.  The trainer machine owns the heavy CUDA
-stack; the capture machine stays focused on video/control/collection.
+v37.1 fixes two field issues found during first setup:
+- LLaMA-Factory currently requires Python >=3.11, so remote scripts no longer use
+  whatever `python3` happens to be when that is 3.10.
+- SSH mkdir and rsync now use an absolute remote directory instead of a quoted
+  `~` path, which previously created `/home/user/~/...` during mkdir but rsynced
+  to `/home/user/...`.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import subprocess
 import tarfile
@@ -49,8 +51,17 @@ class VLMRemoteJob:
         return f"{self.user}@{self.host}"
 
     @property
+    def resolved_remote_root(self) -> str:
+        root = str(self.remote_root or DEFAULT_REMOTE_ROOT).strip()
+        if root == "~":
+            return f"/home/{self.user}"
+        if root.startswith("~/"):
+            return f"/home/{self.user}/{root[2:].lstrip('/')}"
+        return root.rstrip("/")
+
+    @property
     def remote_run_dir(self) -> str:
-        return f"{self.remote_root.rstrip('/')}/{self.run_name}"
+        return f"{self.resolved_remote_root.rstrip('/')}/{self.run_name}"
 
     def commands(self, archive_name: str = "dataset.tar.gz") -> Dict[str, Any]:
         ssh_base = ["ssh", "-p", str(self.ssh_port), self.remote]
@@ -82,26 +93,12 @@ def run_cmd(cmd: List[str], dry_run: bool = True, cwd: Optional[Path] = None) ->
 
 
 def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
-    # LLaMA-Factory config template.  Exact names can change between releases, so
-    # keep it conservative and document it in the generated file.
     cutoff = 4096 if "3090" in hardware else 3072
     batch = 1
     grad_accum = 16 if "3090" in hardware else 24
     quant = 4
     return textwrap.dedent(f"""
-    # aBotTesty v37 VLM LoRA training config
-    # Intended trainer: LLaMA-Factory current release
-    # Model: {job.model_name}
-    # Hardware profile: {hardware}
-    #
-    # Dataset adapter expected:
-    #   dataset/episodes.jsonl
-    #   dataset/sft/screen_perception.jsonl
-    #   dataset/sft/action_policy.jsonl
-    #   dataset/sft/outcome_verifier.jsonl
-    #
-    # First pass target: perception only.  Add policy/verifier after the JSON
-    # validity and risk-recall checks pass.
+    # aBotTesty v37.1 VLM LoRA training config
     model_name_or_path: {job.model_name}
     stage: sft
     do_train: true
@@ -130,24 +127,67 @@ def make_training_config(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
     """).strip() + "\n"
 
 
+def make_python_311_bootstrap(global_venv: str = "$HOME/aBotTesty_vlm_jobs/.venv") -> str:
+    return textwrap.dedent(f"""
+    need_py311() {{
+      "$1" - <<'PY' >/dev/null 2>&1
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+    }}
+
+    activate_vlm_env() {{
+      if [ -x "{global_venv}/bin/python" ] && need_py311 "{global_venv}/bin/python"; then
+        source "{global_venv}/bin/activate"
+        return 0
+      fi
+      if command -v python3.11 >/dev/null 2>&1 && need_py311 python3.11; then
+        python3.11 -m venv "{global_venv}"
+        source "{global_venv}/bin/activate"
+        return 0
+      fi
+      if command -v python3 >/dev/null 2>&1 && need_py311 python3; then
+        python3 -m venv "{global_venv}"
+        source "{global_venv}/bin/activate"
+        return 0
+      fi
+      if command -v conda >/dev/null 2>&1; then
+        CONDA_BASE="$(conda info --base)"
+        source "$CONDA_BASE/etc/profile.d/conda.sh"
+        if ! conda env list | awk '{{print $1}}' | grep -qx 'abot-vlm-py311'; then
+          conda create -y -n abot-vlm-py311 python=3.11
+        fi
+        conda activate abot-vlm-py311
+        return 0
+      fi
+      echo "ERROR: LLaMA-Factory requires Python >=3.11, but this host default is:" >&2
+      python3 --version >&2 || true
+      echo "Install python3.11/python3.11-venv or conda, then rerun setup." >&2
+      exit 11
+    }}
+
+    activate_vlm_env
+    python --version
+    python - <<'PY'
+import sys
+assert sys.version_info >= (3, 11), sys.version
+print('python_ok', sys.version.split()[0])
+PY
+    """).strip()
+
+
 def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str:
-    model = shlex.quote(job.model_name)
+    bootstrap = make_python_311_bootstrap()
     return textwrap.dedent(f"""
     #!/usr/bin/env bash
     set -Eeuo pipefail
-    echo "[v37] remote train job: {job.run_name}" | tee train.log
-    echo "[v37] model: {job.model_name}" | tee -a train.log
+    echo "[v37.1] remote train job: {job.run_name}" | tee train.log
+    echo "[v37.1] model: {job.model_name}" | tee -a train.log
     nvidia-smi | tee -a train.log || true
 
-    if [ ! -d .venv ]; then
-      python3 -m venv .venv
-    fi
-    source .venv/bin/activate
-    python -m pip install --upgrade pip wheel setuptools
+    {bootstrap}
 
-    # CUDA 12.1 wheels are broadly compatible with Ampere cards. If your remote
-    # already has a preferred CUDA/PyTorch stack, install that first and comment
-    # this line out.
+    python -m pip install --upgrade pip wheel setuptools
     python -m pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu121
     python -m pip install --upgrade git+https://github.com/huggingface/transformers accelerate datasets peft bitsandbytes pillow qwen-vl-utils tensorboard
     python -m pip install --upgrade git+https://github.com/hiyouga/LLaMA-Factory.git
@@ -180,16 +220,22 @@ def make_remote_train_script(job: VLMRemoteJob, hardware: str = "2x3090") -> str
     JSON
 
     cp train_config.yaml effective_train_config.yaml
-    echo "[v37] starting llamafactory-cli train" | tee -a train.log
+    echo "[v37.1] starting llamafactory-cli train" | tee -a train.log
     CUDA_VISIBLE_DEVICES=0,1 llamafactory-cli train effective_train_config.yaml 2>&1 | tee -a train.log
-    echo "[v37] training finished" | tee -a train.log
+    echo "[v37.1] training finished" | tee -a train.log
     """).strip() + "\n"
 
 
 def package_dataset(dataset_dir: Path, work_dir: Path) -> Path:
     dataset_dir = dataset_dir.resolve()
     if not dataset_dir.is_dir():
-        raise FileNotFoundError(f"dataset_dir not found: {dataset_dir}")
+        raise FileNotFoundError(
+            f"dataset_dir not found: {dataset_dir}\n"
+            "Export a dataset first, for example:\n"
+            "  python3 learning_dataset_writer.py --root . --run-id first_vlm_dataset\n"
+            "or use an existing export:\n"
+            "  --dataset-dir learning_datasets/latest"
+        )
     archive = work_dir / "dataset.tar.gz"
     with tarfile.open(archive, "w:gz") as tf:
         tf.add(dataset_dir, arcname=dataset_dir.name)
@@ -219,6 +265,16 @@ def submit_job(job: VLMRemoteJob, prepared_dir: Path) -> Dict[str, Any]:
     return {"ok": all(r.get("ok") for r in results), "dry_run": job.dry_run, "remote_dir": cmds["remote_dir"], "results": results, "tail_logs": " ".join(shlex.quote(x) for x in cmds["tail_logs"])}
 
 
+def doctor(job: VLMRemoteJob) -> Dict[str, Any]:
+    dataset = Path(job.dataset_dir).resolve()
+    checks: List[Dict[str, Any]] = []
+    checks.append({"check": "dataset_dir_exists", "ok": dataset.is_dir(), "path": str(dataset)})
+    for rel in ("manifest.json", "episodes.jsonl", "sft/screen_perception.jsonl"):
+        checks.append({"check": f"dataset_has_{rel}", "ok": (dataset / rel).is_file(), "path": str(dataset / rel)})
+    checks.append(run_cmd(["ssh", "-p", str(job.ssh_port), job.remote, "python3 --version && command -v python3.11 || true && nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"], dry_run=job.dry_run))
+    return {"ok": all(c.get("ok", False) for c in checks[:4]), "dry_run": job.dry_run, "remote_dir": job.remote_run_dir, "checks": checks}
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Prepare/submit aBotTesty remote VLM training jobs")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -232,9 +288,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     common.add_argument("--ssh-port", type=int, default=22)
     common.add_argument("--hardware", default="2x3090", choices=["2x3090", "2x3080"])
     common.add_argument("--out-dir", default="vlm_jobs/latest")
-    sp = sub.add_parser("prepare", parents=[common])
+    sub.add_parser("prepare", parents=[common])
     sp = sub.add_parser("submit", parents=[common])
     sp.add_argument("--execute", action="store_true", help="Actually run ssh/rsync/train. Default is dry-run.")
+    dp = sub.add_parser("doctor", parents=[common])
+    dp.add_argument("--execute", action="store_true", help="Actually run SSH preflight. Default is dry-run.")
     args = p.parse_args(argv)
     job = VLMRemoteJob(
         dataset_dir=args.dataset_dir,
@@ -247,6 +305,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         dry_run=not getattr(args, "execute", False),
     )
     out_dir = Path(args.out_dir)
+    if args.cmd == "doctor":
+        result = doctor(job)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
     plan = prepare_job_files(job, out_dir=out_dir, hardware=args.hardware)
     if args.cmd == "prepare":
         print(json.dumps({"ok": True, **plan}, indent=2))
@@ -256,5 +318,5 @@ def main(argv: Optional[List[str]] = None) -> int:
     return 0 if result.get("ok") else 1
 
 
-if __name__ == "__main__":  # pragma: no cover
+if __name__ == "__main__":
     raise SystemExit(main())
