@@ -13,6 +13,7 @@ continues using visual features only.
 from __future__ import annotations
 
 import json
+from atomic_json_store import atomic_write_json
 import logging
 import math
 import os
@@ -278,6 +279,18 @@ class CrawlerConfig:
     channel_suffix_key: str = "select"
     guide_grid_learning_enabled: bool = True
     guide_grid_min_confidence: float = 0.35
+
+    # VLM policy integration.
+    # off: no call; shadow: log only; assist: reorder action list; autonomous: choose
+    # only the VLM-safe action when confidence/risk gates pass.
+    vlm_policy_enabled: bool = False
+    vlm_policy_mode: str = "shadow"
+    vlm_policy_min_confidence: float = 0.65
+    vlm_policy_max_risk: float = 0.35
+    vlm_policy_allow_select: bool = False
+    vlm_policy_every_n_steps: int = 1
+    vlm_policy_timeout_s: float = 30.0
+    vlm_policy_goal: str = "Explore the TV UI safely. Do not purchase, rent, subscribe, delete, reset, or confirm anything."
 
 
     # Continuous deep-exploration controls. Set max_steps=0 to run until stopped.
@@ -997,13 +1010,8 @@ class NavigationGraph:
             self.root_state = None
 
     def save(self) -> None:
-        tmp = self.graph_path.with_suffix(".tmp")
         payload = self.to_dict()
-        if self.compact_save:
-            tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        else:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self.graph_path)
+        atomic_write_json(self.graph_path, payload, compact=bool(self.compact_save))
 
     def reset(self) -> None:
         self.nodes = {}
@@ -2067,6 +2075,17 @@ class AutonomousCrawler:
         self.capture_frame = capture_frame
         self.capture_status = capture_status
         self.send_key = send_key
+        self.vlm_policy_callback = None  # set by merged_app; returns a safe policy decision dict
+        self._vlm_policy_stats: Dict[str, Any] = {
+            "calls": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "shadow": 0,
+            "assist": 0,
+            "autonomous": 0,
+            "errors": 0,
+            "last_decision": {},
+        }
         self.config = config or CrawlerConfig()
         self.extractor = FeatureExtractor(
             self.data_dir,
@@ -2307,8 +2326,9 @@ class AutonomousCrawler:
             "compact_json_saves",
             "video_black_screen_recovery_enabled",
             "sysdiag_bootstrap_enabled",
+            "vlm_policy_enabled", "vlm_policy_allow_select",
         }
-        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "completion_stable_observations_required", "completion_extra_attempts", "human_loading_max_extra_attempts", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps", "video_black_screen_max_recoveries", "hot_loop_save_every_n_actions", "sequence_mining_every_n_steps", "graph_match_candidate_limit", "demo_practice_action_budget_bonus", "demo_practice_every_cycles", "demo_practice_max_edges_per_cycle", "demo_practice_neighbor_actions", "governor_check_every_n_steps", "governor_depth_floor", "governor_depth_ceil", "governor_match_floor", "governor_match_ceil"}
+        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "completion_stable_observations_required", "completion_extra_attempts", "human_loading_max_extra_attempts", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps", "video_black_screen_max_recoveries", "hot_loop_save_every_n_actions", "sequence_mining_every_n_steps", "graph_match_candidate_limit", "demo_practice_action_budget_bonus", "demo_practice_every_cycles", "demo_practice_max_edges_per_cycle", "demo_practice_neighbor_actions", "vlm_policy_every_n_steps", "governor_check_every_n_steps", "governor_depth_floor", "governor_depth_ceil", "governor_match_floor", "governor_match_ceil"}
         float_fields = {
             "settle_s", "reset_settle_s", "between_key_s", "state_similarity_threshold",
             "changed_similarity_threshold", "reward_new_state", "reward_new_menu", "reward_new_setting",
@@ -2318,7 +2338,7 @@ class AutonomousCrawler:
             "continuous_idle_s", "reward_new_edge", "reward_leads_to_unexplored",
             "penalty_repeat_transition", "penalty_same_state_loop", "repeat_reward_floor_for_retry",
             "curiosity_randomness", "fast_known_action_min_reward", "fast_known_action_success_ratio",
-            "max_adaptive_observe_s", "timing_outlier_clip_s", "route_replay_gap_s", "route_replay_checkpoint_s", "max_completion_observe_s", "completion_min_observe_s", "completion_quiet_s", "completion_stability_threshold", "completion_extra_wait_on_incomplete_s", "remarkable_timing_multiplier", "remarkable_timing_min_delta_s", "passive_video_similarity_score", "loading_similarity_score", "human_loading_extra_wait_s", "penalty_transient_loading_state", "penalty_passive_video_duplicate", "reward_human_feature_goal", "video_black_screen_recovery_wait_s", "sysdiag_bootstrap_settle_s", "sysdiag_bootstrap_live_settle_s", "region_first_min_confidence", "region_first_full_ocr_threshold", "hot_loop_save_min_interval_s", "demo_practice_frontier_bonus", "demo_practice_action_bonus", "demo_practice_min_confidence",
+            "max_adaptive_observe_s", "timing_outlier_clip_s", "route_replay_gap_s", "route_replay_checkpoint_s", "max_completion_observe_s", "completion_min_observe_s", "completion_quiet_s", "completion_stability_threshold", "completion_extra_wait_on_incomplete_s", "remarkable_timing_multiplier", "remarkable_timing_min_delta_s", "passive_video_similarity_score", "loading_similarity_score", "human_loading_extra_wait_s", "penalty_transient_loading_state", "penalty_passive_video_duplicate", "reward_human_feature_goal", "video_black_screen_recovery_wait_s", "sysdiag_bootstrap_settle_s", "sysdiag_bootstrap_live_settle_s", "region_first_min_confidence", "region_first_full_ocr_threshold", "hot_loop_save_min_interval_s", "demo_practice_frontier_bonus", "demo_practice_action_bonus", "demo_practice_min_confidence", "vlm_policy_min_confidence", "vlm_policy_max_risk", "vlm_policy_timeout_s",
         }
         for key, value in overrides.items():
             if key not in allowed:
@@ -2839,6 +2859,90 @@ class AutonomousCrawler:
                 self.event("info", "sequence learner suggested next action", action=suggested, confidence=round(float(conf), 3), recent=list(self.recent_actions))
         return ordered
 
+
+    def apply_vlm_policy_order(self, state_id: str, actions: List[str]) -> List[str]:
+        cfg = self.config
+        mode = str(getattr(cfg, "vlm_policy_mode", "shadow") or "shadow").lower()
+        enabled = bool(getattr(cfg, "vlm_policy_enabled", False)) and mode != "off"
+
+        if not enabled or not actions:
+            return actions
+
+        every = max(1, int(getattr(cfg, "vlm_policy_every_n_steps", 1) or 1))
+        if self._steps % every != 0:
+            return actions
+
+        if not callable(getattr(self, "vlm_policy_callback", None)):
+            self._vlm_policy_stats["rejected"] = int(self._vlm_policy_stats.get("rejected") or 0) + 1
+            self._vlm_policy_stats["last_decision"] = {"accepted": False, "reason": "no_vlm_policy_callback"}
+            return actions
+
+        node = self.graph.nodes.get(state_id)
+        focus = node.representative.focus if node and isinstance(getattr(node.representative, "focus", {}), dict) else {}
+        human = focus.get("human_cues") if isinstance(focus, dict) else {}
+
+        context = {
+            "state_id": state_id,
+            "label": node.label if node else state_id,
+            "ocr_text": node.representative.ocr_text if node else "",
+            "focus": focus,
+            "screen_kind": human.get("screen_kind") if isinstance(human, dict) else "",
+            "allowed_actions": list(actions),
+            "goal": getattr(cfg, "vlm_policy_goal", ""),
+            "mode": mode,
+            "min_confidence": float(getattr(cfg, "vlm_policy_min_confidence", 0.65)),
+            "max_risk": float(getattr(cfg, "vlm_policy_max_risk", 0.35)),
+            "allow_select": bool(getattr(cfg, "vlm_policy_allow_select", False)),
+            "step": self._steps,
+        }
+
+        try:
+            decision = self.vlm_policy_callback(context) or {}
+            self._vlm_policy_stats["calls"] = int(self._vlm_policy_stats.get("calls") or 0) + 1
+            self._vlm_policy_stats["last_decision"] = decision
+
+            accepted = bool(decision.get("accepted"))
+            suggested = str(decision.get("suggested_action") or "").strip().lower()
+
+            if accepted and suggested in actions:
+                self._vlm_policy_stats["accepted"] = int(self._vlm_policy_stats.get("accepted") or 0) + 1
+                if mode == "shadow":
+                    self._vlm_policy_stats["shadow"] = int(self._vlm_policy_stats.get("shadow") or 0) + 1
+                    self.event("info", "vlm policy shadow suggestion", state=state_id, suggested=suggested, confidence=decision.get("confidence"), risk=decision.get("risk"), reason=decision.get("reason"))
+                    return actions
+                if mode == "assist":
+                    self._vlm_policy_stats["assist"] = int(self._vlm_policy_stats.get("assist") or 0) + 1
+                    self.event("info", "vlm policy reordered action list", state=state_id, suggested=suggested, confidence=decision.get("confidence"), risk=decision.get("risk"))
+                    return [suggested] + [a for a in actions if a != suggested]
+                if mode == "autonomous":
+                    self._vlm_policy_stats["autonomous"] = int(self._vlm_policy_stats.get("autonomous") or 0) + 1
+                    self.event("warning", "vlm policy autonomous action selected", state=state_id, suggested=suggested, confidence=decision.get("confidence"), risk=decision.get("risk"))
+                    return [suggested]
+
+            self._vlm_policy_stats["rejected"] = int(self._vlm_policy_stats.get("rejected") or 0) + 1
+            self.event("info", "vlm policy rejected/fallback", state=state_id, suggested=suggested, reason=decision.get("reason"), confidence=decision.get("confidence"), risk=decision.get("risk"))
+            return actions
+
+        except Exception as exc:
+            self._vlm_policy_stats["errors"] = int(self._vlm_policy_stats.get("errors") or 0) + 1
+            self._vlm_policy_stats["last_decision"] = {"accepted": False, "error": str(exc)}
+            self.event("warning", "vlm policy call failed; using heuristic actions", state=state_id, error=str(exc))
+            return actions
+
+    def vlm_policy_summary(self) -> Dict[str, Any]:
+        return {
+            "config": {
+                "enabled": bool(getattr(self.config, "vlm_policy_enabled", False)),
+                "mode": str(getattr(self.config, "vlm_policy_mode", "shadow")),
+                "min_confidence": float(getattr(self.config, "vlm_policy_min_confidence", 0.65)),
+                "max_risk": float(getattr(self.config, "vlm_policy_max_risk", 0.35)),
+                "allow_select": bool(getattr(self.config, "vlm_policy_allow_select", False)),
+                "every_n_steps": int(getattr(self.config, "vlm_policy_every_n_steps", 1) or 1),
+            },
+            "stats": dict(getattr(self, "_vlm_policy_stats", {}) or {}),
+        }
+
+
     def build_frontier(self) -> Deque[Tuple[str, int, float]]:
         depths = self.graph.depths_from_root()
         if self.graph.root_state and self.graph.root_state not in depths:
@@ -3007,6 +3111,7 @@ class AutonomousCrawler:
 
                 actions = self.brain.order_actions(remaining_actions) if cfg.self_explore_enabled else list(remaining_actions)
                 actions = self.apply_pattern_action_order(state_id, actions)
+                actions = self.apply_vlm_policy_order(state_id, actions)
                 # Human-like curiosity: mostly exploit learned high-reward paths, but occasionally
                 # try a lower-ranked under-sampled action so it can escape local menu loops.
                 if cfg.self_explore_enabled and len(actions) > 2 and random.random() < max(0.0, min(0.5, cfg.curiosity_randomness)):
@@ -3195,18 +3300,28 @@ class AutonomousCrawler:
             log.debug("pattern classification failed", exc_info=True)
         return fp
 
+    @staticmethod
+    def _split_macro_action(action: str) -> List[str]:
+        """Split explicit learned route macros into individual remote keys."""
+        raw = str(action or "").strip()
+        if not raw:
+            return []
+        if "," in raw or ";" in raw:
+            return [x.strip() for x in re.split(r"[,;]+", raw) if x.strip()]
+        return [raw]
+
     def safe_send(self, key: str) -> Dict[str, Any]:
         key = str(key).strip()
-        # v38-fix: Guard against accidentally-concatenated multi-key strings
-        # (e.g. "back,back,info,guide" stored in learned_sequences). Split and
-        # send each sub-key individually so the SGS lookup never sees a compound.
-        if "," in key:
-            result: Dict[str, Any] = {"ok": False, "error": "empty sequence"}
-            for sub_key in key.split(","):
-                sub_key = sub_key.strip()
-                if sub_key:
-                    result = self.safe_send(sub_key)
-            return result
+        parts = self._split_macro_action(key)
+        if len(parts) > 1:
+            sent = []
+            self.event("debug", "send macro key", key=key, parts=parts)
+            for idx, part in enumerate(parts):
+                sent.append(self.send_key(part))
+                if idx < len(parts) - 1:
+                    time.sleep(max(0.02, float(getattr(self.config, "route_replay_gap_s", 0.12))))
+            time.sleep(self.config.between_key_s)
+            return {"ok": True, "macro": key, "sent": sent, "count": len(sent)}
         self.event("debug", "send key", key=key)
         result = self.send_key(key)
         time.sleep(self.config.between_key_s)
@@ -3216,6 +3331,15 @@ class AutonomousCrawler:
         """Send without the crawler's extra inter-key sleep. Used for replaying
         already-learned paths and timed sequences."""
         key = str(key).strip()
+        parts = self._split_macro_action(key)
+        if len(parts) > 1:
+            sent = []
+            self.event("debug", "fast send macro key", key=key, parts=parts)
+            for idx, part in enumerate(parts):
+                sent.append(self.send_key(part))
+                if idx < len(parts) - 1:
+                    time.sleep(max(0.02, float(getattr(self.config, "route_replay_gap_s", 0.12))))
+            return {"ok": True, "macro": key, "sent": sent, "count": len(sent)}
         self.event("debug", "fast send key", key=key)
         return self.send_key(key)
 

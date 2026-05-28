@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 import json
+from atomic_json_store import atomic_write_json
 
 
 @dataclass
@@ -146,9 +147,7 @@ class SequenceLearner:
             self.learned_sequences = {}
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        atomic_write_json(self.path, self.to_dict(), compact=False, indent=2)
 
     def reset(self) -> None:
         self.action_history.clear(); self.learned_sequences.clear(); self.total_sequences_mined = 0; self.total_suggestions_made = 0; self.successful_suggestions = 0; self.save()
