@@ -567,6 +567,48 @@ _OPERATOR_WORKER_THREAD = threading.Thread(target=_operator_learning_worker, nam
 _OPERATOR_WORKER_THREAD.start()
 
 
+# v38-fix: Watchdog — auto-restart crawler if it dies while continuous mode is on.
+# The crawler thread is not supervised; an exception kills it permanently and it
+# silently logs "crawl finished" instead of "crawler failed". This watchdog polls
+# every 15s and relaunches with exponential back-off to handle transient faults
+# (network loss, SGS timeout, etc.) without spinning on a hard crash loop.
+def _crawler_watchdog_worker() -> None:
+    _BACKOFF_BASE = 5.0
+    _BACKOFF_MAX = 300.0
+    _consecutive_failures = 0
+    while True:
+        try:
+            time.sleep(15.0)
+            status = crawler.status()
+            cfg_continuous = bool(CFG.get("crawler_continuous_exploration_enabled", False))
+            if not status.get("running") and cfg_continuous:
+                wait = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** _consecutive_failures))
+                log.warning(
+                    "crawler watchdog: stopped (reason=%s) — restarting in %.0fs (attempt %d)",
+                    status.get("last_stop_reason", "unknown"), wait, _consecutive_failures + 1,
+                )
+                time.sleep(wait)
+                # Re-check: user may have manually restarted or disabled continuous mode
+                status = crawler.status()
+                if not status.get("running") and bool(CFG.get("crawler_continuous_exploration_enabled", False)):
+                    try:
+                        crawler.start()
+                        _consecutive_failures += 1
+                        log.info("crawler watchdog: restarted successfully (attempt %d)", _consecutive_failures)
+                    except Exception as _wdog_exc:
+                        log.warning("crawler watchdog: restart failed: %s", _wdog_exc)
+                        _consecutive_failures += 1
+            else:
+                if status.get("running"):
+                    _consecutive_failures = max(0, _consecutive_failures - 1)
+        except Exception as _wdog_outer_exc:
+            log.debug("crawler watchdog error: %s", _wdog_outer_exc)
+
+
+_CRAWLER_WATCHDOG_THREAD = threading.Thread(target=_crawler_watchdog_worker, name="CrawlerWatchdog", daemon=True)
+_CRAWLER_WATCHDOG_THREAD.start()
+
+
 def _enqueue_operator_learning(item: Dict[str, Any]) -> bool:
     try:
         _OPERATOR_LEARNING_QUEUE.put_nowait(item)

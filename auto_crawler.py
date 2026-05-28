@@ -2087,10 +2087,47 @@ class AutonomousCrawler:
             self._last_error = ""
             self._last_stop_reason = ""
             self._steps = 0
+            # v38-fix: Validate anchor sequences before launch to catch bad keys.
+            self._validate_anchor_sequences()
             self._thread = threading.Thread(target=self._run_safe, name="AutonomousCrawler", daemon=True)
             self._thread.start()
             self.event("info", "crawl started", run_id=self._run_id)
             return self.status()
+
+    def _validate_anchor_sequences(self) -> None:
+        """v38-fix: Sanitise anchor_sequences before a crawl run starts.
+
+        Removes keys that have no SGS mapping and splits accidentally-concatenated
+        comma-separated strings into proper sub-lists so reseed_exploration()
+        never triggers 'No SGS mapping for <compound_key>' ValueErrors.
+        """
+        cfg = self.config
+        if not getattr(cfg, "anchor_sequences", None):
+            return
+        try:
+            from jamboree.commands import button_id_to_number  # local import avoids circular dep
+        except ImportError:
+            return
+        valid_keys: set = set(button_id_to_number.keys())
+        cleaned = []
+        for seq in cfg.anchor_sequences:
+            clean_seq: list = []
+            for key in seq:
+                key_lower = str(key).lower().strip()
+                # Split comma-separated compound keys stored as a single string.
+                parts = [k.strip() for k in key_lower.split(",")] if "," in key_lower else [key_lower]
+                for part in parts:
+                    if part in valid_keys:
+                        clean_seq.append(part)
+                    else:
+                        self.event("warning", "anchor sequence key removed (no SGS mapping)",
+                                   key=part, original_sequence=seq)
+            if clean_seq:
+                cleaned.append(clean_seq)
+        if cleaned != cfg.anchor_sequences:
+            self.event("info", "anchor sequences sanitised",
+                       before=len(cfg.anchor_sequences), after=len(cleaned))
+            cfg.anchor_sequences = cleaned
 
     def apply_overrides(self, overrides: Dict[str, Any]) -> None:
         allowed = set(CrawlerConfig.__dataclass_fields__.keys())
@@ -2656,10 +2693,18 @@ class AutonomousCrawler:
         if self.graph.root_state and self.graph.root_state not in depths:
             depths[self.graph.root_state] = 0
         candidates: List[Tuple[float, str, int]] = []
+        cfg = self.config
         for sid in self.graph.nodes:
             depth = depths.get(sid, 99)
-            if depth > self.config.max_depth:
-                continue
+            # v38-fix: In continuous mode, treat unreachable/orphaned nodes as
+            # depth=max_depth (low priority) instead of filtering them out entirely.
+            # Without this, disconnected subgraphs are never visited after a
+            # root-change or crash, causing the frontier to collapse to 1 node.
+            if depth > cfg.max_depth:
+                if cfg.continuous_exploration_enabled:
+                    depth = cfg.max_depth
+                else:
+                    continue
             remaining = self.remaining_actions_for_state(sid)
             if not remaining:
                 continue
@@ -2698,13 +2743,28 @@ class AutonomousCrawler:
         for key in seq:
             if self._stop.is_set():
                 return None
-            self.safe_send(key)
+            # v38-fix: Invalid keys in anchor_sequences must not crash the crawler.
+            try:
+                self.safe_send(key)
+            except (ValueError, KeyError) as exc:
+                self.event("warning", "reseed skipped invalid key", key=key, error=str(exc))
+                continue
             time.sleep(self.brain.expected_settle_s(key, cfg))
         try:
             sid, created, cmp = self.current_state_id()
             self.graph.root_state = self.graph.root_state or sid
+            # v38-fix: Create a synthetic edge root→reseeded_state so the new
+            # state becomes reachable in depths_from_root() on the next cycle.
+            # This bridges the gap caused by graph fragmentation after restarts.
+            if sid and sid != self.graph.root_state and sid in self.graph.nodes:
+                _synthetic_action = f"__reseed_{cycle % 100}"
+                self.graph.record_edge(
+                    self.graph.root_state, _synthetic_action, sid,
+                    changed=True, success=True, confidence=0.3,
+                    sample={"source": "reseed_synthetic", "cycle": cycle},
+                )
             self.graph.save()
-            # PATCH v16-fix: Force the reseeded state back into the frontier.
+            # v16-fix: Force the reseeded state back into the frontier.
             # Without this, states already saturated at max_action_attempts_per_state
             # are permanently excluded from build_frontier() even after a reseed,
             # causing continuous reseeding with zero actual exploration.
@@ -2832,8 +2892,12 @@ class AutonomousCrawler:
                 break
             # In continuous mode, re-seed after each pass. This prevents the
             # worker from looking idle just because the current root was swept.
+            # v38-fix: Wrap in try/except — a bad key must not kill the main loop.
             if cfg.reseed_when_idle:
-                self.reseed_exploration(cycles)
+                try:
+                    self.reseed_exploration(cycles)
+                except Exception as _reseed_exc:
+                    self.event("warning", "reseed failed in main loop", error=str(_reseed_exc))
     def scan_channels(self, root_id: str) -> None:
         cfg = self.config
         unique_channels = []
@@ -2982,6 +3046,16 @@ class AutonomousCrawler:
 
     def safe_send(self, key: str) -> Dict[str, Any]:
         key = str(key).strip()
+        # v38-fix: Guard against accidentally-concatenated multi-key strings
+        # (e.g. "back,back,info,guide" stored in learned_sequences). Split and
+        # send each sub-key individually so the SGS lookup never sees a compound.
+        if "," in key:
+            result: Dict[str, Any] = {"ok": False, "error": "empty sequence"}
+            for sub_key in key.split(","):
+                sub_key = sub_key.strip()
+                if sub_key:
+                    result = self.safe_send(sub_key)
+            return result
         self.event("debug", "send key", key=key)
         result = self.send_key(key)
         time.sleep(self.config.between_key_s)
@@ -3235,6 +3309,21 @@ class AutonomousCrawler:
         cfg = self.config
         if self.graph.root_state is None:
             return False
+        # v38-fix: In continuous mode, skip the full retry loop for nodes that have
+        # no path from root — each retry costs restore_start_context + capture (~5s).
+        # With 900+ orphaned nodes this was burning hours before any useful work.
+        # Instead we do a fast O(1) path check and opportunistically accept the
+        # node if it happens to already be on-screen right now.
+        if cfg.continuous_exploration_enabled and target_state != self.graph.root_state:
+            has_path = self.graph.shortest_path(self.graph.root_state, target_state) is not None
+            if not has_path:
+                try:
+                    sid, _, _ = self.current_state_id()
+                    if sid == target_state:
+                        return True
+                except Exception:
+                    pass
+                return False
         for attempt in range(max(1, cfg.replay_retries)):
             self.restore_start_context()
             sid, _, cmp = self.current_state_id()
