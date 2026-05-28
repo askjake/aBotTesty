@@ -72,9 +72,19 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_dir": "logs",
     "crawler_dir": "crawler_data",
     "crawler_enabled_keys": ["up", "down", "left", "right", "guide", "back", "home", "info", "select", "live", "recall", "input", "diamond", "ddiamond", "options", "dvr", "ch_up", "ch_down"],
-    "crawler_max_steps": 250,
-    "crawler_max_states": 80,
-    "crawler_max_depth": 7,
+    "crawler_max_steps": 0,
+    "crawler_max_states": 0,
+    "crawler_max_depth": 18,
+    "crawler_governor_enabled": True,
+    "crawler_governor_mem_warn_pct": 72.0,
+    "crawler_governor_mem_critical_pct": 88.0,
+    "crawler_governor_step_target_s": 6.0,
+    "crawler_governor_slow_step_s": 14.0,
+    "crawler_governor_depth_floor": 8,
+    "crawler_governor_depth_ceil": 24,
+    "crawler_governor_match_floor": 60,
+    "crawler_governor_match_ceil": 600,
+    "crawler_governor_check_every_n_steps": 20,
     "crawler_state_similarity_threshold": 0.86,
     "crawler_changed_similarity_threshold": 0.94,
     "crawler_ocr_enabled": True,
@@ -356,9 +366,19 @@ crawler = AutonomousCrawler(
     send_key=crawler_send_key,
     config=CrawlerConfig(
         enabled_keys=list(CFG.get("crawler_enabled_keys", [])),
-        max_steps=int(CFG.get("crawler_max_steps", 250)),
-        max_states=int(CFG.get("crawler_max_states", 80)),
-        max_depth=int(CFG.get("crawler_max_depth", 7)),
+        max_steps=int(CFG.get("crawler_max_steps", 0)),
+        max_states=int(CFG.get("crawler_max_states", 0)),
+        max_depth=int(CFG.get("crawler_max_depth", 18)),
+        governor_enabled=bool(CFG.get("crawler_governor_enabled", True)),
+        governor_mem_warn_pct=float(CFG.get("crawler_governor_mem_warn_pct", 72.0)),
+        governor_mem_critical_pct=float(CFG.get("crawler_governor_mem_critical_pct", 88.0)),
+        governor_step_target_s=float(CFG.get("crawler_governor_step_target_s", 6.0)),
+        governor_slow_step_s=float(CFG.get("crawler_governor_slow_step_s", 14.0)),
+        governor_depth_floor=int(CFG.get("crawler_governor_depth_floor", 8)),
+        governor_depth_ceil=int(CFG.get("crawler_governor_depth_ceil", 24)),
+        governor_match_floor=int(CFG.get("crawler_governor_match_floor", 60)),
+        governor_match_ceil=int(CFG.get("crawler_governor_match_ceil", 600)),
+        governor_check_every_n_steps=int(CFG.get("crawler_governor_check_every_n_steps", 20)),
         state_similarity_threshold=float(CFG.get("crawler_state_similarity_threshold", 0.86)),
         changed_similarity_threshold=float(CFG.get("crawler_changed_similarity_threshold", 0.94)),
         ocr_enabled=bool(CFG.get("crawler_ocr_enabled", True)),
@@ -1051,20 +1071,30 @@ def crawler_page() -> Response:
 <section class="stack">
   <div class="card">
     <h2>Continuous explorer</h2>
-    <div class="hint">Set max steps to <b>0</b> for endless exploration. It scores each state/button pair, retries useful hallways, and penalizes loops unless they lead to new rooms.</div>
+    <div class="hint">Runs continuously — the <b>dynamic governor</b> self-tunes depth and speed based on memory and step latency. Hard limits are removed; exploration runs until you press Stop.</div>
     <label>Starting button / sequence</label><input id="start_sequence" placeholder="home, guide or apps">
     <label>Buttons to explore</label><textarea id="enabled_keys">up,down,left,right,guide,back,home,info,select,live,recall,input,diamond,ddiamond,options</textarea>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-      <label>Max steps<input id="max_steps" type="number" value="0"></label>
-      <label>Max states<input id="max_states" type="number" value="350"></label>
-      <label>Max depth<input id="max_depth" type="number" value="18"></label>
-      <label>Attempts/action<input id="max_action_attempts_per_state" type="number" value="3"></label>
-      <label>Idle sweep seconds<input id="continuous_idle_s" type="number" step="0.1" value="1.5"></label>
-      <label>Curiosity<input id="curiosity_randomness" type="number" step="0.01" value="0.14"></label>
-      <label>Max cycles<input id="max_cycles" type="number" value="0"></label>
-      <label>Reseed every cycles<input id="idle_reseed_every_cycles" type="number" value="1"></label>
+      <label>Attempts/action<input id="max_action_attempts_per_state" type="number" value="3" title="How many times to try each button per state before moving on"></label>
+      <label>Curiosity<input id="curiosity_randomness" type="number" step="0.01" value="0.14" title="0=pure exploit, 0.5=half random — injects variety to escape menu loops"></label>
+      <label>Idle sweep seconds<input id="continuous_idle_s" type="number" step="0.1" value="1.5" title="How long to wait between reseed idle cycles"></label>
+      <label>Reseed every N cycles<input id="idle_reseed_every_cycles" type="number" value="1" title="Reseed from anchors every N frontier-exhaustion cycles"></label>
     </div>
-    <label>Idle/reseed anchor sequences <span class="hint">semicolon separated</span></label><textarea id="anchor_sequences">back; home; home,guide; live; guide; home,dvr; home,settings; info; options; input</textarea>
+    <label>Idle/reseed anchor sequences <span class="hint">semicolon separated</span></label><textarea id="anchor_sequences">back; home; home,guide; live; guide; home,dvr; home,down,down,select; info; options; input</textarea>
+    <details style="margin:8px 0"><summary style="cursor:pointer;color:#93c5fd;font-size:12px">⚙ Governor tuning (auto-adjusts depth &amp; speed)</summary>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;padding:8px;background:#0a0d14;border-radius:8px">
+      <label><input id="governor_enabled" type="checkbox" checked style="width:auto"> Enable dynamic governor</label>
+      <label style="grid-column:span 2;color:#6b7280;font-size:11px">Depth range (governor adjusts within these bounds):</label>
+      <label>Min depth<input id="governor_depth_floor" type="number" value="8" title="Minimum crawl depth — governor will not go below this"></label>
+      <label>Max depth<input id="governor_depth_ceil" type="number" value="24" title="Maximum crawl depth — governor will not exceed this"></label>
+      <label style="grid-column:span 2;color:#6b7280;font-size:11px">Memory thresholds (% system RAM):</label>
+      <label>Throttle at %<input id="governor_mem_warn_pct" type="number" value="72" title="Start reducing graph search width above this memory %"></label>
+      <label>Critical at %<input id="governor_mem_critical_pct" type="number" value="88" title="Aggressively reduce depth and save graph above this memory %"></label>
+      <label>Target step s<input id="governor_step_target_s" type="number" step="0.5" value="6" title="Target seconds per exploration step (governor speeds up/slows pacing to hit this)"></label>
+      <label>Slow step s<input id="governor_slow_step_s" type="number" step="0.5" value="14" title="Steps taking longer than this trigger depth reduction"></label>
+    </div>
+    <div id="governor_status" style="margin-top:6px;font-size:11px;color:#6b7280">Governor: waiting for first run…</div>
+    </details>
     <label><input id="continuous_exploration_enabled" type="checkbox" checked style="width:auto"> Continually explore until stopped</label>
     <label><input id="reseed_when_idle" type="checkbox" checked style="width:auto"> When frontier runs dry, actively reseed from Home/Guide/Live/etc.</label>
     <label><input id="self_explore_enabled" type="checkbox" checked style="width:auto"> Rewarded self-exploration</label>
@@ -1146,7 +1176,7 @@ function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&l
 function short(s,n=38){s=String(s||''); return s.length>n?s.slice(0,n-1)+'…':s;}
 function seqVal(id){return qs(id).value.split(/[ ,]+/).map(x=>x.trim()).filter(Boolean);}
 async function api(url, body){const opt=body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}; const r=await fetch(url,opt); return await r.json();}
-function crawlBody(){return {start_sequence:seqVal('start_sequence'), enabled_keys:seqVal('enabled_keys'), max_steps:+qs('max_steps').value, max_states:+qs('max_states').value, max_depth:+qs('max_depth').value, max_action_attempts_per_state:+qs('max_action_attempts_per_state').value, continuous_idle_s:+qs('continuous_idle_s').value, curiosity_randomness:+qs('curiosity_randomness').value, max_cycles:+qs('max_cycles').value, idle_reseed_every_cycles:+qs('idle_reseed_every_cycles').value, anchor_sequences:qs('anchor_sequences').value, continuous_exploration_enabled:qs('continuous_exploration_enabled').checked, reseed_when_idle:qs('reseed_when_idle').checked, self_explore_enabled:qs('self_explore_enabled').checked, adaptive_timing_enabled:qs('adaptive_timing_enabled').checked, allow_select_on_dangerous_text:qs('allow_select_on_dangerous_text').checked, channel_learning_enabled:qs('channel_learning_enabled').checked, channel_scan_list:qs('channel_scan_list').value, channel_digit_gap_s:+qs('channel_digit_gap_s').value};}
+function crawlBody(){return {start_sequence:seqVal('start_sequence'), enabled_keys:seqVal('enabled_keys'), max_steps:0, max_states:0, max_cycles:0, max_action_attempts_per_state:+qs('max_action_attempts_per_state').value, continuous_idle_s:+qs('continuous_idle_s').value, curiosity_randomness:+qs('curiosity_randomness').value, idle_reseed_every_cycles:+qs('idle_reseed_every_cycles').value, anchor_sequences:qs('anchor_sequences').value, continuous_exploration_enabled:qs('continuous_exploration_enabled').checked, reseed_when_idle:qs('reseed_when_idle').checked, self_explore_enabled:qs('self_explore_enabled').checked, adaptive_timing_enabled:qs('adaptive_timing_enabled').checked, allow_select_on_dangerous_text:qs('allow_select_on_dangerous_text').checked, channel_learning_enabled:qs('channel_learning_enabled').checked, channel_scan_list:qs('channel_scan_list').value, channel_digit_gap_s:+qs('channel_digit_gap_s').value, governor_enabled:qs('governor_enabled')?qs('governor_enabled').checked:true, governor_depth_floor:qs('governor_depth_floor')?+qs('governor_depth_floor').value:8, governor_depth_ceil:qs('governor_depth_ceil')?+qs('governor_depth_ceil').value:24, governor_mem_warn_pct:qs('governor_mem_warn_pct')?+qs('governor_mem_warn_pct').value:72, governor_mem_critical_pct:qs('governor_mem_critical_pct')?+qs('governor_mem_critical_pct').value:88, governor_step_target_s:qs('governor_step_target_s')?+qs('governor_step_target_s').value:6, governor_slow_step_s:qs('governor_slow_step_s')?+qs('governor_slow_step_s').value:14};}
 async function startCrawl(){qs('status').textContent=JSON.stringify(await api('/api/crawl/start', crawlBody()),null,2); setTimeout(refreshAll,900)}
 async function stopCrawl(){qs('status').textContent=JSON.stringify(await api('/api/crawl/stop',{}),null,2); setTimeout(refreshAll,600)}
 async function classifyNow(){qs('route_result').textContent=JSON.stringify(await api('/api/crawl/classify',{}),null,2); setTimeout(refreshAll,600)}
@@ -1177,7 +1207,7 @@ async function loadStatus(){
   if(statusInFlight) return;
   statusInFlight=true;
   try{
-    const j=await api('/api/crawl/status'); const cont=j.config&&j.config.continuous_exploration_enabled; qs('runpill').textContent=j.running?(cont?'continuous ':'running ')+j.steps+' steps':'idle'+(j.last_stop_reason?' · '+j.last_stop_reason:''); qs('runpill').className='pill '+(j.running?'active':'inactive'); qs('status').textContent=JSON.stringify(j,null,2); qs('events').textContent=JSON.stringify(j.recent_events||[],null,2); const learning=j.learning||{}; qs('brain_notes').textContent=JSON.stringify({stop_reason:j.last_stop_reason,last_error:j.last_error,coverage:learning.coverage, known_concepts:learning.known_concepts, known_titles:learning.known_menu_titles, known_focus_items:(learning.known_focus_items||[]).slice(0,20), known_setting_pairs:(learning.known_setting_pairs||[]).slice(0,20), known_token_count:learning.known_token_count, graph_file:j.graph_file, brain_file:j.brain_file, performance:j.performance, demonstrations:j.demonstrations},null,2);
+    const j=await api('/api/crawl/status'); const cont=j.config&&j.config.continuous_exploration_enabled; qs('runpill').textContent=j.running?(cont?'continuous ':'running ')+j.steps+' steps':'idle'+(j.last_stop_reason?' · '+j.last_stop_reason:''); qs('runpill').className='pill '+(j.running?'active':'inactive'); qs('status').textContent=JSON.stringify(j,null,2); qs('events').textContent=JSON.stringify(j.recent_events||[],null,2); const learning=j.learning||{}; qs('brain_notes').textContent=JSON.stringify({stop_reason:j.last_stop_reason,last_error:j.last_error,coverage:learning.coverage, known_concepts:learning.known_concepts, known_titles:learning.known_menu_titles, known_focus_items:(learning.known_focus_items||[]).slice(0,20), known_setting_pairs:(learning.known_setting_pairs||[]).slice(0,20), known_token_count:learning.known_token_count, graph_file:j.graph_file, brain_file:j.brain_file, performance:j.performance, demonstrations:j.demonstrations},null,2); const gov=(j.performance&&j.performance.governor)||{}; const gs=qs('governor_status'); if(gs&&Object.keys(gov).length){gs.textContent='Governor: depth='+gov.cur_depth+' · match_limit='+gov.cur_match_limit+' · step='+gov.avg_step_s+'s · mem='+gov.mem_pct+'% · proc='+gov.process_mem_mb+'MB';}
   } finally { statusInFlight=false; }
 }
 async function loadMap(force=false){

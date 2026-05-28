@@ -28,7 +28,7 @@
   ],
   "crawler_max_steps": 0,
   "crawler_max_states": 0,
-  "crawler_max_depth": 15,
+  "crawler_max_depth": 18,
   "crawler_state_similarity_threshold": 0.86,
   "crawler_changed_similarity_threshold": 0.94,
   "crawler_ocr_enabled": true,
@@ -94,5 +94,15 @@
     ]
   ],
   "crawler_max_action_attempts_per_state": 10,
-  "crawler_repeat_reward_floor_for_retry": 1.0
+  "crawler_repeat_reward_floor_for_retry": 1.0,
+  "crawler_governor_enabled": true,
+  "crawler_governor_mem_warn_pct": 72.0,
+  "crawler_governor_mem_critical_pct": 88.0,
+  "crawler_governor_step_target_s": 6.0,
+  "crawler_governor_slow_step_s": 14.0,
+  "crawler_governor_depth_floor": 8,
+  "crawler_governor_depth_ceil": 24,
+  "crawler_governor_match_floor": 60,
+  "crawler_governor_match_ceil": 600,
+  "crawler_governor_check_every_n_steps": 20
 }

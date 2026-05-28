@@ -15,11 +15,16 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import random
 import re
 import threading
 import time
 import uuid
+try:
+    import psutil as _psutil
+except ImportError:  # pragma: no cover
+    _psutil = None  # type: ignore
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -136,9 +141,22 @@ class CrawlerConfig:
     settle_s: float = 1.15
     reset_settle_s: float = 1.8
     between_key_s: float = 0.08
-    max_steps: int = 250
-    max_states: int = 80
-    max_depth: int = 7
+    # Hard limits — 0 means unlimited. In continuous mode these are managed
+    # automatically by the DynamicGovernor; do not set manually.
+    max_steps: int = 0
+    max_states: int = 0
+    max_depth: int = 18
+    # Dynamic governor
+    governor_enabled: bool = True
+    governor_mem_warn_pct: float = 72.0
+    governor_mem_critical_pct: float = 88.0
+    governor_step_target_s: float = 6.0
+    governor_slow_step_s: float = 14.0
+    governor_depth_floor: int = 8
+    governor_depth_ceil: int = 24
+    governor_match_floor: int = 60
+    governor_match_ceil: int = 600
+    governor_check_every_n_steps: int = 20
     state_similarity_threshold: float = 0.86
     changed_similarity_threshold: float = 0.94
     min_active_required: bool = True
@@ -1912,6 +1930,129 @@ class CrawlerBrain:
         return {k: asdict(v) for k, v in sorted(self.channels.items(), key=lambda kv: int(kv[0]))}
 
 
+
+class _DynamicGovernor:
+    """v38: Self-tuning performance governor for continuous exploration.
+
+    Watches step latency and system memory, then adjusts:
+      - max_depth                    (how deep the frontier searches)
+      - graph_match_candidate_limit  (state dedup comparison width)
+      - between_key_s                (pacing when the system is slow)
+
+    Hard limits (max_steps, max_states, max_cycles) are 0 (unlimited) in
+    continuous mode so they never interrupt exploration. They are only
+    non-zero for single-pass/testing scenarios.
+    """
+
+    def __init__(self, config: "CrawlerConfig", graph) -> None:
+        self._cfg = config
+        self._graph = graph
+        self._step_times: list = []
+        self._window = 10
+        self._last_check_step: int = 0
+        self._action_start: float = 0.0
+
+    def action_start(self) -> None:
+        self._action_start = time.time()
+
+    def action_end(self) -> None:
+        if self._action_start:
+            self._step_times.append(time.time() - self._action_start)
+            if len(self._step_times) > self._window * 3:
+                self._step_times = self._step_times[-self._window:]
+            self._action_start = 0.0
+
+    def maybe_tune(self, step: int) -> dict:
+        cfg = self._cfg
+        if not getattr(cfg, "governor_enabled", True):
+            return {}
+        every = max(1, int(getattr(cfg, "governor_check_every_n_steps", 20) or 20))
+        if step - self._last_check_step < every:
+            return {}
+        self._last_check_step = step
+        return self._tune()
+
+    @staticmethod
+    def _mem_pct() -> float:
+        if _psutil is None:
+            return 0.0
+        try:
+            return float(_psutil.virtual_memory().percent)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _process_mem_mb() -> float:
+        if _psutil is None:
+            return 0.0
+        try:
+            return _psutil.Process(os.getpid()).memory_info().rss / 1_048_576
+        except Exception:
+            return 0.0
+
+    def _avg_step_s(self) -> float:
+        recent = self._step_times[-self._window:] if self._step_times else []
+        return sum(recent) / len(recent) if recent else 0.0
+
+    def _tune(self) -> dict:
+        cfg = self._cfg
+        changes: dict = {}
+        mem_pct   = self._mem_pct()
+        avg_step  = self._avg_step_s()
+        node_count = len(self._graph.nodes)
+
+        warn_pct   = float(getattr(cfg, "governor_mem_warn_pct",      72.0))
+        crit_pct   = float(getattr(cfg, "governor_mem_critical_pct",  88.0))
+        step_target= float(getattr(cfg, "governor_step_target_s",      6.0))
+        slow_step  = float(getattr(cfg, "governor_slow_step_s",       14.0))
+        d_floor    = int(getattr(cfg,   "governor_depth_floor",         8))
+        d_ceil     = int(getattr(cfg,   "governor_depth_ceil",         24))
+        m_floor    = int(getattr(cfg,   "governor_match_floor",        60))
+        m_ceil     = int(getattr(cfg,   "governor_match_ceil",        600))
+
+        # graph_match_candidate_limit: scale with node count, contract under pressure
+        ideal_limit = max(m_floor, min(m_ceil, node_count * 2 + 80))
+        if mem_pct > crit_pct:
+            ideal_limit = max(m_floor, ideal_limit // 2)
+        elif mem_pct > warn_pct:
+            ideal_limit = max(m_floor, int(ideal_limit * 0.70))
+        cur_limit = int(getattr(cfg, "graph_match_candidate_limit", 240) or 240)
+        new_limit = int(cur_limit * 0.75 + ideal_limit * 0.25)
+        if abs(new_limit - cur_limit) >= 5:
+            cfg.graph_match_candidate_limit = new_limit
+            self._graph.match_candidate_limit = new_limit
+            changes["graph_match_candidate_limit"] = new_limit
+
+        # max_depth: grow when healthy, shrink under load
+        cur_depth = int(getattr(cfg, "max_depth", 18))
+        if mem_pct > crit_pct or (avg_step > 0 and avg_step > slow_step):
+            new_depth = max(d_floor, cur_depth - 1)
+        elif mem_pct < warn_pct * 0.80 and (avg_step == 0 or avg_step < step_target):
+            new_depth = min(d_ceil, cur_depth + 1)
+        else:
+            new_depth = cur_depth
+        if new_depth != cur_depth:
+            cfg.max_depth = new_depth
+            changes["max_depth"] = new_depth
+
+        # between_key_s: slow pacing when system is stressed
+        cur_gap = float(getattr(cfg, "between_key_s", 0.0) or 0.0)
+        if avg_step > slow_step and cur_gap < 0.5:
+            new_gap = min(0.5, cur_gap + 0.05)
+            cfg.between_key_s = new_gap
+            changes["between_key_s"] = round(new_gap, 3)
+        elif avg_step > 0 and avg_step < step_target and cur_gap > 0.0:
+            new_gap = max(0.0, cur_gap - 0.02)
+            cfg.between_key_s = new_gap
+            changes["between_key_s"] = round(new_gap, 3)
+
+        if changes:
+            changes["_mem_pct"]   = round(mem_pct, 1)
+            changes["_avg_step_s"]= round(avg_step, 2)
+            changes["_nodes"]     = node_count
+        return changes
+
+
 class AutonomousCrawler:
     def __init__(
         self,
@@ -1953,6 +2094,7 @@ class AutonomousCrawler:
         self.recent_actions: Deque[str] = deque(maxlen=12)
         self.events: Deque[CrawlEvent] = deque(maxlen=300)
         self._lock = threading.RLock()
+        self._governor = _DynamicGovernor(self.config, self.graph)
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._running = False
@@ -2032,6 +2174,14 @@ class AutonomousCrawler:
                     "hot_loop_save_min_interval_s": float(getattr(self.config, "hot_loop_save_min_interval_s", 8.0) or 8.0),
                     "graph_match_candidate_limit": int(getattr(self.config, "graph_match_candidate_limit", 240) or 0),
                     "sequence_mining_every_n_steps": int(getattr(self.config, "sequence_mining_every_n_steps", 24) or 24),
+                    "governor": {
+                        "enabled": bool(getattr(self.config, "governor_enabled", True)),
+                        "avg_step_s": round(self._governor._avg_step_s(), 2),
+                        "mem_pct": round(self._governor._mem_pct(), 1),
+                        "process_mem_mb": round(self._governor._process_mem_mb(), 1),
+                        "cur_depth": int(getattr(self.config, "max_depth", 18)),
+                        "cur_match_limit": int(getattr(self.config, "graph_match_candidate_limit", 240) or 240),
+                    },
                 },
                 "graph_file": str(self.graph.graph_path),
                 "brain_file": str(self.brain.path),
@@ -2137,6 +2287,7 @@ class AutonomousCrawler:
             "allow_select_on_dangerous_text",
             "ocr_enabled",
             "home_first",
+            "governor_enabled",
             "self_explore_enabled",
             "adaptive_timing_enabled",
             "channel_learning_enabled",
@@ -2157,7 +2308,7 @@ class AutonomousCrawler:
             "video_black_screen_recovery_enabled",
             "sysdiag_bootstrap_enabled",
         }
-        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "completion_stable_observations_required", "completion_extra_attempts", "human_loading_max_extra_attempts", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps", "video_black_screen_max_recoveries", "hot_loop_save_every_n_actions", "sequence_mining_every_n_steps", "graph_match_candidate_limit", "demo_practice_action_budget_bonus", "demo_practice_every_cycles", "demo_practice_max_edges_per_cycle", "demo_practice_neighbor_actions"}
+        int_fields = {"max_steps", "max_states", "max_depth", "replay_retries", "stable_observations_required", "completion_stable_observations_required", "completion_extra_attempts", "human_loading_max_extra_attempts", "max_cycles", "max_action_attempts_per_state", "transition_sample_limit", "flow_lane_card_w", "flow_lane_card_h", "idle_reseed_every_cycles", "fast_known_action_min_attempts", "deep_ocr_every_n_steps", "video_black_screen_max_recoveries", "hot_loop_save_every_n_actions", "sequence_mining_every_n_steps", "graph_match_candidate_limit", "demo_practice_action_budget_bonus", "demo_practice_every_cycles", "demo_practice_max_edges_per_cycle", "demo_practice_neighbor_actions", "governor_check_every_n_steps", "governor_depth_floor", "governor_depth_ceil", "governor_match_floor", "governor_match_ceil"}
         float_fields = {
             "settle_s", "reset_settle_s", "between_key_s", "state_similarity_threshold",
             "changed_similarity_threshold", "reward_new_state", "reward_new_menu", "reward_new_setting",
@@ -2912,7 +3063,7 @@ class AutonomousCrawler:
             return
         self.event("info", "channel learning scan started", channels=unique_channels)
         for ch in unique_channels:
-            if self._stop.is_set() or self._steps >= cfg.max_steps:
+            if self._stop.is_set() or (cfg.max_steps and self._steps >= cfg.max_steps):
                 break
             if not self.navigate_to_state(root_id):
                 self.event("warning", "unable to restore root before channel scan", channel=ch)
@@ -3363,6 +3514,7 @@ class AutonomousCrawler:
         self._steps += 1
         action_norm = str(action).strip()
         action_lower = action_norm.lower()
+        self._governor.action_start()
         self.event("info", "try action", from_state=from_state, action=action_norm, step=self._steps)
 
         # For confident known state/actions, use a visual-only pre-check so command
@@ -3569,6 +3721,10 @@ class AutonomousCrawler:
             reward=reward,
             response_s=round(response_s, 3),
         )
+        self._governor.action_end()
+        _gov_changes = self._governor.maybe_tune(self._steps)
+        if _gov_changes:
+            self.event("info", "governor tuned", **_gov_changes)
         self.mark_learning_dirty()
         self.maybe_save_hot_loop()
 
