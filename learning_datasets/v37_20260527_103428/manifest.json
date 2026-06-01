@@ -1,0 +1,38 @@
+{
+  "schema": "abot_learning_dataset_v37_phase1",
+  "run_id": "v37_20260527_103428",
+  "created_at": "2026-05-27T16:34:29+00:00",
+  "root_dir": "/home/montjac/aBotTesty",
+  "crawler_dir": "/home/montjac/aBotTesty/crawler_data",
+  "episode_count": 633,
+  "image_count": 0,
+  "sft_counts": {
+    "screen_perception": 0,
+    "action_policy": 0,
+    "outcome_verifier": 0
+  },
+  "artifacts": {
+    "nav_graph": [
+      "/home/montjac/aBotTesty/crawler_data/nav_graph.json"
+    ],
+    "crawler_brain": [
+      "/home/montjac/aBotTesty/crawler_data/crawler_brain.json",
+      "/home/montjac/aBotTesty/crawler_brain.json"
+    ],
+    "teacher": [],
+    "channel_surf": [
+      "/home/montjac/aBotTesty/crawler_data/channel_surf_log.json",
+      "/home/montjac/aBotTesty/channel_surf_log.json"
+    ],
+    "sysdiag": [],
+    "sequences": [
+      "/home/montjac/aBotTesty/learned_sequences.json"
+    ]
+  },
+  "model_targets": [
+    "screen_perception",
+    "action_policy_shadow_mode",
+    "outcome_verifier"
+  ],
+  "safety_note": "Phase 1 only exports data. It does not allow a model to press remote keys."
+}

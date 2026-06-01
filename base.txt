@@ -4,7 +4,7 @@
             "protocol": "SGS",
             "role": "hopper",
             "remote": "14",
-            "ip": "10.73.185.30",
+            "ip": "10.73.184.29",
             "stb": "R1956409151-66",
             "receiver": "",
             "cid": 4,

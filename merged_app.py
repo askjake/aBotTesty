@@ -21,6 +21,7 @@ import io
 import json
 import logging
 import os
+import re
 import time
 import queue
 import threading
@@ -49,6 +50,8 @@ from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
 from learning_dataset_writer import LearningDatasetWriter  # noqa: E402
 from vlm_remote_trainer import VLMRemoteJob, prepare_job_files, submit_job  # noqa: E402
+from vlm_model_manager import VLMModelManager  # noqa: E402
+from vlm_training_monitor import build_training_dashboard_payload, tail_remote_train_log  # noqa: E402
 
 log = logging.getLogger("merged.app")
 
@@ -159,6 +162,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "vlm_remote_root": "~/aBotTesty_vlm_jobs",
     "vlm_default_model_3090": "Qwen/Qwen3-VL-8B-Instruct",
     "vlm_default_model_3080": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "vlm_policy_enabled": False,
+    "vlm_policy_mode": "shadow",
+    "vlm_policy_server_url": "http://10.79.85.35:8765",
+    "vlm_policy_min_confidence": 0.65,
+    "vlm_policy_max_risk": 0.35,
+    "vlm_policy_allow_select": False,
+    "vlm_policy_timeout_s": 30.0,
+    "vlm_policy_every_n_steps": 1,
+    "vlm_policy_goal": "Explore the TV UI safely. Do not purchase, rent, subscribe, delete, reset, or confirm anything.",
 }
 
 
@@ -184,6 +196,7 @@ if os.getenv("MERGED_CAPTURE_DEVICE"):
 SNAPSHOT_DIR = (ROOT / str(CFG["snapshot_dir"])).resolve()
 LOG_DIR = (ROOT / str(CFG["log_dir"])).resolve()
 CRAWLER_DIR = (ROOT / str(CFG["crawler_dir"])).resolve()
+CRAWLER_USER_STOP_REQUESTED = threading.Event()
 SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 CRAWLER_DIR.mkdir(parents=True, exist_ok=True)
@@ -286,6 +299,17 @@ def key_sequence_for(key: str, channel_suffix_key: str = "select") -> List[str]:
     multiple short-gap button presses rather than one long command.
     """
     raw = str(key or "").strip()
+    if not raw:
+        raise ValueError("empty key")
+
+    if "," in raw or ";" in raw:
+        seq: List[str] = []
+        for part in re.split(r"[,;]+", raw):
+            part = part.strip()
+            if part:
+                seq.extend(key_sequence_for(part, channel_suffix_key=channel_suffix_key))
+        return seq
+
     upper = raw.upper()
     channel = None
     for prefix in ("CH_", "CH:", "CHANNEL_", "CHANNEL:"):
@@ -432,8 +456,32 @@ crawler = AutonomousCrawler(
         transition_sample_limit=int(CFG.get("crawler_transition_sample_limit", 30)),
         flow_lane_card_w=int(CFG.get("crawler_flow_lane_card_w", 280)),
         flow_lane_card_h=int(CFG.get("crawler_flow_lane_card_h", 190)),
+        vlm_policy_enabled=bool(CFG.get("vlm_policy_enabled", False)),
+        vlm_policy_mode=str(CFG.get("vlm_policy_mode", "shadow")),
+        vlm_policy_min_confidence=float(CFG.get("vlm_policy_min_confidence", 0.65)),
+        vlm_policy_max_risk=float(CFG.get("vlm_policy_max_risk", 0.35)),
+        vlm_policy_allow_select=bool(CFG.get("vlm_policy_allow_select", False)),
+        vlm_policy_timeout_s=float(CFG.get("vlm_policy_timeout_s", 30.0)),
+        vlm_policy_every_n_steps=int(CFG.get("vlm_policy_every_n_steps", 1)),
+        vlm_policy_goal=str(CFG.get("vlm_policy_goal", "Explore the TV UI safely.")),
     ),
 )
+
+
+vlm_manager = VLMModelManager(ROOT, CFG)
+
+
+def _crawler_vlm_policy_callback(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Ask the active VLM shadow server for a policy suggestion.
+
+    The manager does not press keys. It returns a gated decision that the crawler
+    can use in shadow/assist/autonomous mode.
+    """
+    frame = monitor.get_frame()
+    return vlm_manager.policy_from_frame(frame, context=context)
+
+
+crawler.vlm_policy_callback = _crawler_vlm_policy_callback
 
 
 parental_agent = ParentalControlAgent(crawler, CRAWLER_DIR)
@@ -603,6 +651,11 @@ def _crawler_watchdog_worker() -> None:
             cfg_continuous = bool(CFG.get("crawler_continuous_exploration_enabled", False))
             if not status.get("running") and cfg_continuous:
                 wait = min(_BACKOFF_MAX, _BACKOFF_BASE * (2 ** _consecutive_failures))
+                _watchdog_reason = str(locals().get("reason") or locals().get("stop_reason") or getattr(crawler, "last_stop_reason", "") or "")
+                if CRAWLER_USER_STOP_REQUESTED.is_set() or _watchdog_reason == "stop_requested":
+                    log.info("crawler watchdog: user stop requested; auto-restart suppressed")
+                    time.sleep(max(1.0, float(CFG.get("crawler_continuous_idle_s", 2.0))))
+                    continue
                 log.warning(
                     "crawler watchdog: stopped (reason=%s) — restarting in %.0fs (attempt %d)",
                     status.get("last_stop_reason", "unknown"), wait, _consecutive_failures + 1,
@@ -1356,26 +1409,371 @@ def _learning_writer() -> LearningDatasetWriter:
     )
 
 
+_VLM_ASYNC_JOBS: Dict[str, Dict[str, Any]] = {}
+_VLM_ASYNC_LOCK = threading.Lock()
+
+
 @app.route("/learning")
 def learning_page() -> Response:
     return Response(
         """
-<!doctype html><html><head><meta charset="utf-8"><title>aBotTesty v37 Learning Dataset</title>
-<style>body{background:#0d1117;color:#e5edf5;font-family:Segoe UI,Arial,sans-serif;margin:0}header{padding:14px 18px;background:#151b23}main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:14px}button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer;font-weight:700}button.warn{background:#b45309}input{background:#0b1016;color:#e5edf5;border:1px solid #3b4450;border-radius:8px;padding:8px;width:95%}pre{white-space:pre-wrap;word-break:break-word;color:#b6c2cf;max-height:560px;overflow:auto}</style></head>
-<body><header><b>v37 Phase 1 — Learning Dataset + Remote VLM Trainer</b> · <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a></header>
-<main><section class="card"><h2>Dataset exporter</h2><p>Exports before/action/after episodes plus VLM SFT JSONL files. This does not let a model control the STB.</p><input id="run_id" placeholder="optional run id"><br><br><button onclick="stats()">Stats</button><button onclick="exportData()">Export dataset</button><pre id="out">ready</pre></section>
-<section class="card"><h2>Remote 2x3090 trainer</h2><p>Default target: montjac@10.79.85.35. Dry-run first; execute only after SSH keys and dataset export are verified.</p><input id="dataset_dir" placeholder="dataset dir" value="learning_datasets/latest"><br><br><input id="model" value="Qwen/Qwen3-VL-8B-Instruct"><br><br><button onclick="planRemote()">Plan remote job</button><button class="warn" onclick="submitRemote(false)">Submit dry-run</button><pre id="remote">ready</pre></section></main>
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>aBotTesty VLM Learning + Training Monitor</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--ink:#e5edf5;--muted:#94a3b8;--blue:#2563eb;--green:#16a34a;--orange:#b45309;--red:#991b1b;--cyan:#38bdf8}
+*{box-sizing:border-box} body{background:var(--bg);color:var(--ink);font-family:Segoe UI,Arial,sans-serif;margin:0}
+header{padding:14px 18px;background:#151b23;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}
+a{color:#93c5fd} main{padding:16px;display:grid;grid-template-columns:1.15fr .85fr;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.15)}
+.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.kpi{background:#0b1016;border:1px solid #253041;border-radius:12px;padding:12px}.kpi b{display:block;font-size:26px}.kpi span{color:var(--muted);font-size:12px}
+button{background:var(--blue);color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer;font-weight:700}
+button.warn{background:var(--orange)} button.good{background:var(--green)} button.bad{background:var(--red)}
+input,select{background:#0b1016;color:var(--ink);border:1px solid #3b4450;border-radius:8px;padding:8px;width:100%;margin:5px 0}
+pre{white-space:pre-wrap;word-break:break-word;color:#b6c2cf;background:#0b1016;border:1px solid #263244;border-radius:10px;padding:10px;max-height:520px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:12px} th,td{padding:7px;border-bottom:1px solid #263244;text-align:left;vertical-align:top} th{color:#bfdbfe}
+.bar{height:10px;background:#1e293b;border-radius:999px;overflow:hidden}.bar i{display:block;height:100%;background:linear-gradient(90deg,#2563eb,#22c55e)}
+.pill{display:inline-block;padding:3px 7px;border-radius:999px;background:#1f2937;border:1px solid #334155;color:#dbeafe;font-size:12px}
+.goodtxt{color:#4ade80}.warntxt{color:#fbbf24}.badtxt{color:#fb7185}.muted{color:var(--muted)}
+svg{width:100%;height:220px;background:#0b1016;border:1px solid #263244;border-radius:10px}
+.full{grid-column:1/-1}
+@media(max-width:1100px){main{grid-template-columns:1fr}.grid,.grid3{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div><b>VLM Learning + Training Monitor</b> · <a href="/monitor">monitor</a> · <a href="/intelligence">intelligence</a> · <a href="/dashboards">dashboards</a></div>
+  <div class="muted">Tracks dataset growth, SFT mix, remote training loss, runtime, failures, and training efficiency.</div>
+</header>
+<main>
+  <section class="card">
+    <h2>Dataset readiness</h2>
+    <div class="grid">
+      <div class="kpi"><b id="k_score">—</b><span>readiness score</span></div>
+      <div class="kpi"><b id="k_sft">—</b><span>SFT rows</span></div>
+      <div class="kpi"><b id="k_imgs">—</b><span>dataset / live images</span></div>
+      <div class="kpi"><b id="k_rows_img">—</b><span>rows / image</span></div>
+    </div>
+    <p class="muted" id="dataset_flags"></p>
+    <h3>SFT task mix</h3>
+    <svg id="mix_chart"></svg>
+    <h3>Dataset growth</h3>
+    <svg id="growth_chart"></svg>
+    <div class="grid3">
+      <div><label>Run id</label><input id="run_id" placeholder="optional run id"></div>
+      <div><label>Max records</label><input id="max_records" type="number" value="0"></div>
+      <div><label>&nbsp;</label><button onclick="exportData()">Export dataset</button></div>
+    </div>
+    <pre id="export_out">ready</pre>
+  </section>
+
+  <section class="card">
+    <h2>Remote 2×3090 trainer</h2>
+    <label>Dataset dir</label><input id="dataset_dir" value="learning_datasets/latest">
+    <label>Model</label><input id="model" value="Qwen/Qwen3-VL-8B-Instruct">
+    <label>Hardware</label><select id="hardware"><option>2x3090</option><option>2x3080</option></select>
+    <button onclick="planRemote()">Plan</button>
+    <button onclick="submitRemote(false)">Submit dry-run async</button>
+    <button class="warn" onclick="submitRemote(true)">Submit LIVE async</button>
+    <button class="good" onclick="refresh()">Refresh</button>
+    <pre id="remote_out">ready</pre>
+  </section>
+
+  <section class="card full">
+    <h2>Training efficiency</h2>
+    <div class="grid">
+      <div class="kpi"><b id="k_jobs">—</b><span>remote jobs</span></div>
+      <div class="kpi"><b id="k_completed">—</b><span>completed</span></div>
+      <div class="kpi"><b id="k_failed">—</b><span>failed</span></div>
+      <div class="kpi"><b id="k_best_loss">—</b><span>best train loss</span></div>
+    </div>
+    <h3>Latest/best loss curve</h3>
+    <svg id="loss_chart"></svg>
+    <div id="job_cards"></div>
+  </section>
+
+  <section class="card full">
+    <h2>Live train.log tail</h2>
+    <div class="grid3">
+      <div><label>Remote dir</label><input id="tail_remote_dir" placeholder="/home/montjac/aBotTesty_vlm_jobs/abot_vlm_..."></div>
+      <div><label>Lines</label><input id="tail_lines" type="number" value="160"></div>
+      <div><label>&nbsp;</label><button onclick="tailLog()">Tail log</button></div>
+    </div>
+    <pre id="tail_out">Select a job below or paste a remote_dir.</pre>
+  </section>
+</main>
 <script>
-async function api(u,b=null){const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{};const r=await fetch(u,opt);return await r.json()}
-async function stats(){out.textContent=JSON.stringify(await api('/api/learning/stats'),null,2)}
-async function exportData(){out.textContent='exporting...';out.textContent=JSON.stringify(await api('/api/learning/export',{run_id:run_id.value}),null,2)}
-async function planRemote(){remote.textContent=JSON.stringify(await api('/api/learning/remote/plan',{dataset_dir:dataset_dir.value,model:model.value}),null,2)}
-async function submitRemote(execute){remote.textContent=JSON.stringify(await api('/api/learning/remote/submit',{dataset_dir:dataset_dir.value,model:model.value,execute}),null,2)}
-stats();
-</script></body></html>
+const qs=id=>document.getElementById(id);
+let STATE={};
+
+async function api(u,b=null){
+  const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{};
+  const r=await fetch(u,opt);
+  return await r.json();
+}
+function esc(s){return String(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+function n(v){return Number(v||0)}
+function fmt(v,d=2){return v===null||v===undefined||v===''?'—':Number(v).toFixed(d)}
+function statusClass(s){s=String(s||'');return s==='completed'?'goodtxt':s==='failed'?'badtxt':'warntxt'}
+
+function drawBars(svgId, rows, labelKey, valueKey){
+  const svg=qs(svgId), W=900,H=220,p=34;
+  rows=rows||[];
+  const max=Math.max(1,...rows.map(r=>n(r[valueKey])));
+  let html=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+  html+=`<line x1="${p}" y1="${H-p}" x2="${W-p}" y2="${H-p}" stroke="#334155"/>`;
+  const bw=(W-p*2)/Math.max(1,rows.length);
+  rows.forEach((r,i)=>{
+    const val=n(r[valueKey]), h=(H-p*2)*val/max, x=p+i*bw+4, y=H-p-h;
+    html+=`<rect x="${x}" y="${y}" width="${Math.max(4,bw-8)}" height="${h}" rx="5" fill="#2563eb"><title>${esc(r[labelKey])}: ${val}</title></rect>`;
+    if(rows.length<=12) html+=`<text x="${x}" y="${H-8}" font-size="10" fill="#94a3b8" transform="rotate(0 ${x} ${H-8})">${esc(String(r[labelKey]).slice(0,14))}</text>`;
+  });
+  html+=`</svg>`;
+  svg.outerHTML=html.replace('<svg ',`<svg id="${svgId}" `);
+}
+function drawLine(svgId, rows, xKey, yKey){
+  const svg=qs(svgId), W=900,H=220,p=34;
+  rows=rows||[];
+  const vals=rows.map(r=>n(r[yKey])).filter(v=>Number.isFinite(v));
+  const max=Math.max(1,...vals), min=Math.min(...vals, max);
+  let html=`<svg id="${svgId}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+  html+=`<line x1="${p}" y1="${H-p}" x2="${W-p}" y2="${H-p}" stroke="#334155"/>`;
+  if(rows.length){
+    const pts=rows.map((r,i)=>{
+      const x=p+(W-p*2)*(rows.length===1?0:i/(rows.length-1));
+      const y=H-p-(H-p*2)*(n(r[yKey])-min)/Math.max(.0001,max-min);
+      return [x,y,r];
+    });
+    html+=`<polyline fill="none" stroke="#38bdf8" stroke-width="3" points="${pts.map(p=>p[0]+','+p[1]).join(' ')}"/>`;
+    pts.forEach(([x,y,r])=>html+=`<circle cx="${x}" cy="${y}" r="4" fill="#4ade80"><title>${esc(r[xKey])}: ${r[yKey]}</title></circle>`);
+  }
+  html+=`</svg>`;
+  svg.outerHTML=html;
+}
+
+function renderJobs(jobs){
+  jobs=jobs||[];
+  let html='<table><thead><tr><th>Run</th><th>Status</th><th>Examples</th><th>Steps</th><th>Loss</th><th>Runtime</th><th>Samples/s</th><th>Dataset</th><th>Action</th></tr></thead><tbody>';
+  for(const j of jobs){
+    const m=j.metrics||{}, c=j.dataset_counts||{};
+    html+=`<tr>
+      <td><code>${esc(j.run_name)}</code><br><span class="muted">${esc(j.remote_dir||'')}</span></td>
+      <td class="${statusClass(m.status)}">${esc(m.status||'unknown')}<br>${fmt(m.progress_pct,1)}%</td>
+      <td>${esc(m.num_examples||'')}</td>
+      <td>${esc(m.total_steps||'')}</td>
+      <td>${fmt(m.train_loss ?? m.last_loss,4)}<br><span class="muted">best ${fmt(m.best_loss,4)}</span></td>
+      <td>${fmt(m.train_runtime_s,1)}s</td>
+      <td>${fmt(m.train_samples_per_second,2)}</td>
+      <td>screen ${c.screen_perception||0}<br>policy ${c.action_policy||0}<br>verify ${c.outcome_verifier||0}<br>img ${c.images||0}</td>
+      <td><button onclick="selectTail('${esc(j.remote_dir)}')">tail</button></td>
+    </tr>`;
+  }
+  html+='</tbody></table>';
+  qs('job_cards').innerHTML=html;
+}
+
+function render(j){
+  STATE=j;
+  const latest=j.latest_dataset||{}, sum=j.summary||{}, live=j.live_source||{};
+  qs('k_score').textContent=(latest.readiness_score??0)+'%';
+  qs('k_sft').textContent=latest.total_sft_rows??0;
+  qs('k_imgs').textContent=(latest.image_count??0)+' / '+(live.state_image_files??0);
+  qs('k_rows_img').textContent=latest.rows_per_image??0;
+
+  const flags=(latest.quality_flags||[]).map(x=>`<span class="pill">${esc(x)}</span>`);
+  if(latest.selection_source) flags.push(`<span class="pill">dataset: ${esc(latest.selection_source)}</span>`);
+  if(latest.selection_warning) flags.push(`<span class="pill badtxt">${esc(latest.selection_warning)}</span>`);
+  flags.push(`<span class="pill">live states: ${live.nav_nodes??0}</span>`);
+  flags.push(`<span class="pill">live edges: ${live.nav_edges??0}</span>`);
+  flags.push(`<span class="pill">teacher events: ${live.teacher_events??0}</span>`);
+  flags.push(`<span class="pill">channel observations: ${live.channel_surf_observations??0}</span>`);
+  qs('dataset_flags').innerHTML=flags.join(' ') || '<span class="goodtxt">No obvious dataset flags.</span>';
+
+  drawBars('mix_chart', latest.task_mix||[], 'task', 'count');
+  const growth=(j.dataset_timeline||[]).slice().reverse().map(r=>({name:r.name, total_sft_rows:r.total_sft_rows}));
+  drawLine('growth_chart', growth, 'name', 'total_sft_rows');
+
+  qs('k_jobs').textContent=sum.remote_jobs_seen??0;
+  qs('k_completed').textContent=sum.completed_train_jobs??0;
+  qs('k_failed').textContent=sum.failed_train_jobs??0;
+  qs('k_best_loss').textContent=fmt(sum.best_train_loss,4);
+
+  const jobs=j.remote_jobs||[];
+  let chosen=jobs.find(x=>(x.metrics||{}).loss_history?.length) || jobs[0] || {};
+  drawLine('loss_chart', ((chosen.metrics||{}).loss_history||[]), 'step', 'loss');
+  renderJobs(jobs);
+
+  if(!qs('tail_remote_dir').value && jobs[0]?.remote_dir) qs('tail_remote_dir').value=jobs[0].remote_dir;
+}
+
+async function refresh(){
+  const j=await api('/api/learning/training/overview');
+  render(j);
+}
+async function exportData(){
+  qs('export_out').textContent='exporting...';
+  const body={run_id:qs('run_id').value,max_records:+qs('max_records').value};
+  const j=await api('/api/learning/export',body);
+  qs('export_out').textContent=JSON.stringify(j,null,2);
+  await refresh();
+}
+async function planRemote(){
+  const body={dataset_dir:qs('dataset_dir').value,model:qs('model').value,hardware:qs('hardware').value};
+  qs('remote_out').textContent=JSON.stringify(await api('/api/learning/remote/plan',body),null,2);
+}
+async function submitRemote(live){
+  const body={dataset_dir:qs('dataset_dir').value,model:qs('model').value,hardware:qs('hardware').value,execute:live,dry_run:!live};
+  qs('remote_out').textContent='submitted async...';
+  const j=await api('/api/learning/remote/submit_async',body);
+  qs('remote_out').textContent=JSON.stringify(j,null,2);
+  await refresh();
+}
+function selectTail(remoteDir){qs('tail_remote_dir').value=remoteDir; tailLog();}
+async function tailLog(){
+  const j=await api('/api/learning/remote/tail',{remote_dir:qs('tail_remote_dir').value,lines:+qs('tail_lines').value});
+  qs('tail_out').textContent=j.text || j.error || JSON.stringify(j,null,2);
+}
+setInterval(refresh,10000);
+refresh();
+</script>
+</body>
+</html>
         """,
         mimetype="text/html",
     )
+
+
+
+@app.route("/api/learning/training/overview", methods=["GET"])
+def api_learning_training_overview():
+    try:
+        include_remote = str(request.args.get("remote", "true")).lower() not in {"0", "false", "no"}
+        with _VLM_ASYNC_LOCK:
+            runtime = json.loads(json.dumps(_VLM_ASYNC_JOBS, default=str))
+        return jsonify(build_training_dashboard_payload(
+            ROOT,
+            CRAWLER_DIR,
+            CFG,
+            runtime_jobs=runtime,
+            include_remote=include_remote,
+        ))
+    except Exception as exc:
+        log.exception("learning training overview failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/learning/remote/tail", methods=["POST", "GET"])
+def api_learning_remote_tail():
+    data = request.get_json(silent=True) or {}
+    remote_dir = str(data.get("remote_dir") or request.args.get("remote_dir") or "").strip()
+    lines = int(data.get("lines") or request.args.get("lines") or 160)
+    try:
+        return jsonify(tail_remote_train_log(remote_dir, CFG, lines=lines))
+    except Exception as exc:
+        log.exception("remote train log tail failed")
+        return jsonify(ok=False, error=str(exc), remote_dir=remote_dir), 500
+
+
+
+def remote_training_processes_active() -> Dict[str, Any]:
+    """Return whether remote VLM training appears active on the trainer host."""
+    host = str(CFG.get("vlm_remote_host", "10.79.85.35"))
+    user = str(CFG.get("vlm_remote_user", "montjac"))
+    cmd = (
+        "pgrep -af 'torchrun|llamafactory|llamafactory-cli|train_remote.sh' "
+        "| grep -v pgrep || true"
+    )
+    try:
+        r = subprocess.run(
+            ["ssh", f"{user}@{host}", cmd],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        lines = [x for x in r.stdout.splitlines() if x.strip()]
+        return {
+            "ok": r.returncode == 0,
+            "active": bool(lines),
+            "host": host,
+            "processes": lines,
+            "stderr": r.stderr[-2000:],
+        }
+    except Exception as exc:
+        return {"ok": False, "active": False, "host": host, "error": str(exc), "processes": []}
+
+
+
+@app.route("/api/learning/remote/submit_async", methods=["POST"])
+def api_learning_remote_submit_async():
+    data = request.get_json(silent=True) or {}
+    active_check = remote_training_processes_active()
+    if active_check.get("active") and not bool(data.get("force", False)):
+        return jsonify({
+            "ok": False,
+            "error": "remote VLM training is already active; pass force:true only if you intentionally want a duplicate",
+            "active_training": active_check,
+        }), 409
+
+    try:
+        job = _remote_job_from_request(data)
+        hardware = str(data.get("hardware") or "2x3090")
+        out_dir = ROOT / "vlm_jobs" / job.run_name
+        prepare_job_files(job, out_dir=out_dir, hardware=hardware)
+
+        entry = {
+            "run_name": job.run_name,
+            "status": "queued",
+            "dry_run": job.dry_run,
+            "dataset_dir": job.dataset_dir,
+            "model_name": job.model_name,
+            "remote_dir": job.remote_run_dir,
+            "hardware": hardware,
+            "submitted_at": datetime.now().isoformat(timespec="seconds"),
+            "started_at": "",
+            "finished_at": "",
+            "result": None,
+            "error": "",
+        }
+
+        with _VLM_ASYNC_LOCK:
+            _VLM_ASYNC_JOBS[job.run_name] = dict(entry)
+
+        def _runner() -> None:
+            with _VLM_ASYNC_LOCK:
+                _VLM_ASYNC_JOBS[job.run_name]["status"] = "running"
+                _VLM_ASYNC_JOBS[job.run_name]["started_at"] = datetime.now().isoformat(timespec="seconds")
+            try:
+                result = submit_job(job, prepared_dir=out_dir)
+                with _VLM_ASYNC_LOCK:
+                    _VLM_ASYNC_JOBS[job.run_name]["result"] = result
+                    _VLM_ASYNC_JOBS[job.run_name]["status"] = "completed" if result.get("ok") else "failed"
+                    _VLM_ASYNC_JOBS[job.run_name]["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            except Exception as exc:
+                log.exception("async remote VLM job failed")
+                with _VLM_ASYNC_LOCK:
+                    _VLM_ASYNC_JOBS[job.run_name]["status"] = "failed"
+                    _VLM_ASYNC_JOBS[job.run_name]["error"] = str(exc)
+                    _VLM_ASYNC_JOBS[job.run_name]["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+        threading.Thread(target=_runner, daemon=True, name=f"vlm-train-{job.run_name}").start()
+
+        return jsonify(
+            ok=True,
+            async_job=entry,
+            tail_logs=f"ssh -p {job.ssh_port} {job.user}@{job.host} 'tail -f {job.remote_run_dir}/train.log'",
+        )
+    except Exception as exc:
+        log.exception("remote VLM async submit failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/learning/remote/async_jobs", methods=["GET"])
+def api_learning_remote_async_jobs():
+    with _VLM_ASYNC_LOCK:
+        return jsonify(ok=True, jobs=list(_VLM_ASYNC_JOBS.values()))
 
 
 @app.route("/api/learning/stats", methods=["GET"])
@@ -1440,8 +1838,267 @@ def api_learning_remote_submit():
         log.exception("remote VLM submit failed")
         return jsonify(ok=False, error=str(exc)), 500
 
+
+
+# ---------------------------------------------------------------------------
+# VLM policy/runtime management
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/vlm/runs", methods=["GET"])
+def api_vlm_runs():
+    try:
+        limit = int(request.args.get("limit") or 40)
+        return jsonify(vlm_manager.remote_runs(limit=limit))
+    except Exception as exc:
+        log.exception("VLM runs list failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/vlm/status", methods=["GET"])
+def api_vlm_status():
+    try:
+        out = vlm_manager.status()
+        out["crawler_policy"] = crawler.vlm_policy_summary() if hasattr(crawler, "vlm_policy_summary") else {}
+        return jsonify(out)
+    except Exception as exc:
+        log.exception("VLM status failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/vlm/config", methods=["POST"])
+def api_vlm_config():
+    data = request.get_json(silent=True) or {}
+    try:
+        state = vlm_manager.update_config(data)
+
+        # Keep live crawler config in sync without restart.
+        if "enabled" in data:
+            crawler.config.vlm_policy_enabled = bool(state.get("enabled"))
+        if "mode" in data:
+            crawler.config.vlm_policy_mode = str(state.get("mode") or "shadow")
+        if "min_confidence" in data:
+            crawler.config.vlm_policy_min_confidence = float(state.get("min_confidence") or 0.65)
+        if "max_risk" in data:
+            crawler.config.vlm_policy_max_risk = float(state.get("max_risk") or 0.35)
+        if "allow_select" in data:
+            crawler.config.vlm_policy_allow_select = bool(state.get("allow_select"))
+        if "timeout_s" in data:
+            crawler.config.vlm_policy_timeout_s = float(state.get("timeout_s") or 30.0)
+
+        return jsonify(ok=True, state=state, crawler_policy=crawler.vlm_policy_summary() if hasattr(crawler, "vlm_policy_summary") else {})
+    except Exception as exc:
+        log.exception("VLM config failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/vlm/policy/test", methods=["POST", "GET"])
+def api_vlm_policy_test():
+    data = request.get_json(silent=True) or {}
+    try:
+        frame = monitor.get_frame()
+        actions = data.get("allowed_actions") or crawler.config.enabled_keys
+        context = {
+            "state_id": data.get("state_id") or getattr(crawler, "_last_state", ""),
+            "label": data.get("label") or "live policy test",
+            "allowed_actions": actions,
+            "goal": data.get("goal") or CFG.get("vlm_policy_goal", "Explore the TV UI safely."),
+            "mode": data.get("mode") or vlm_manager.load_state().get("mode", "shadow"),
+        }
+        decision = vlm_manager.policy_from_frame(frame, context=context)
+        reordered = vlm_manager.apply_policy_to_actions(list(actions), decision)
+        return jsonify(ok=True, decision=decision, input_actions=actions, output_actions=reordered, video=monitor.get_status())
+    except Exception as exc:
+        log.exception("VLM policy test failed")
+        return jsonify(ok=False, error=str(exc), video=monitor.get_status()), 500
+
+
+@app.route("/api/vlm/adapter/pull", methods=["POST"])
+def api_vlm_adapter_pull():
+    data = request.get_json(silent=True) or {}
+    try:
+        run_name = str(data.get("run_name") or "").strip()
+        return jsonify(vlm_manager.pull_remote_adapter(run_name))
+    except Exception as exc:
+        log.exception("VLM adapter pull failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/vlm/adapter/promote", methods=["POST"])
+def api_vlm_adapter_promote():
+    data = request.get_json(silent=True) or {}
+    try:
+        run_name = str(data.get("run_name") or "").strip()
+        pull_local = bool(data.get("pull_local", True))
+        restart_shadow = bool(data.get("restart_shadow", True))
+        out = vlm_manager.promote_remote_adapter(run_name, pull_local=pull_local, restart_shadow=restart_shadow)
+        return jsonify(out)
+    except Exception as exc:
+        log.exception("VLM adapter promote failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/vlm_control")
+def vlm_control_page() -> Response:
+    return Response("""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>aBotTesty VLM Control</title>
+<style>
+body{background:#0d1117;color:#e5edf5;font-family:Segoe UI,Arial,sans-serif;margin:0}
+header{padding:14px 18px;background:#151b23}
+main{display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:14px}
+button{background:#2563eb;color:white;border:0;border-radius:10px;padding:9px 12px;margin:4px;cursor:pointer;font-weight:700}
+button.warn{background:#b45309}.danger{background:#b91c1c}.ok{background:#166534}
+input,select{background:#0b1016;color:#e5edf5;border:1px solid #3b4450;border-radius:8px;padding:8px;width:95%;margin:4px}
+pre{white-space:pre-wrap;word-break:break-word;color:#b6c2cf;max-height:520px;overflow:auto}
+.pill{display:inline-block;background:#374151;border-radius:999px;padding:4px 8px;margin:2px}table{border-collapse:collapse;width:100%;font-size:12px}td,th{border-bottom:1px solid #30363d;padding:5px;text-align:left}.runsTable tr:hover{background:#1f2937;cursor:pointer}.activeRun{outline:2px solid #22c55e}.bad{color:#fca5a5}.good{color:#86efac}
+</style>
+</head>
+<body>
+<header><b>VLM Policy + Adapter Control</b> · <a href="/learning" style="color:#93c5fd">learning</a> · <a href="/monitor" style="color:#93c5fd">monitor</a></header>
+<main>
+<section class="card">
+<h2>Runtime mode</h2>
+<p>Use shadow first. Assist reorders crawler actions. Autonomous chooses only a safe VLM action from the crawler's allowed list.</p>
+<select id="mode">
+  <option value="off">off</option>
+  <option value="shadow">shadow</option>
+  <option value="assist">assist</option>
+  <option value="autonomous">autonomous</option>
+</select>
+<label><input id="enabled" type="checkbox" style="width:auto"> enabled</label><br>
+<label><input id="allow_select" type="checkbox" style="width:auto"> allow select</label><br>
+<input id="min_confidence" placeholder="min confidence" value="0.65">
+<input id="max_risk" placeholder="max risk" value="0.35">
+<input id="server_url" placeholder="server url" value="http://10.79.85.35:8765">
+<button onclick="saveConfig()">Save mode</button>
+<button onclick="testPolicy()">Test policy on current screen</button>
+<pre id="policy_out">ready</pre>
+</section>
+
+<section class="card">
+<h2>Adapter promotion</h2>
+<p>Select a completed remote run, review stats, pull it local, and restart the 3090 shadow server with that adapter.</p>
+<div>
+  <button onclick="loadRuns()">Load available runs</button>
+  <button onclick="refresh()">Refresh status</button>
+</div>
+<select id="available_runs" size="9" style="width:98%" onchange="selectRunFromList()"></select>
+<input id="run_name" placeholder="abot_vlm_YYYYMMDD_HHMMSS">
+<button class="ok" onclick="promote()">Promote selected + pull + restart shadow</button>
+<button onclick="pullOnly()">Pull selected local only</button>
+<div id="run_cards"></div>
+<pre id="status_out">ready</pre>
+</section>
+</main>
+
+<script>
+async function api(u,b=null){const opt=b?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}:{};const r=await fetch(u,opt);return await r.json()}
+function qs(id){return document.getElementById(id)}
+let REMOTE_RUNS=[];
+
+function fmtRun(r){
+  const m=r.metrics||{}, d=r.dataset_counts||{};
+  const loss=(m.train_loss??'—');
+  const steps=(m.total_steps??'—');
+  const img=(d.images??0);
+  const rows=(r.total_sft_rows??0);
+  const flags=[
+    r.status,
+    r.has_adapter?'adapter':'no_adapter',
+    r.is_pulled_local?'local':'remote',
+    r.is_health_adapter?'ACTIVE':''
+  ].filter(Boolean).join(' · ');
+  return `${r.run_name} | ${flags} | loss ${loss} | steps ${steps} | rows ${rows} | img ${img}`;
+}
+
+function selectRunFromList(){
+  const sel=qs('available_runs');
+  const rn=sel.value;
+  qs('run_name').value=rn;
+  const r=REMOTE_RUNS.find(x=>x.run_name===rn);
+  if(!r){return;}
+  qs('run_cards').innerHTML=`<table class="runsTable">
+    <tr><th>Run</th><td>${r.run_name}</td></tr>
+    <tr><th>Status</th><td>${r.status} ${r.has_adapter?'✅':'⚠️ no adapter'}</td></tr>
+    <tr><th>Loss</th><td>${(r.metrics||{}).train_loss ?? '—'}</td></tr>
+    <tr><th>Steps</th><td>${(r.metrics||{}).total_steps ?? '—'}</td></tr>
+    <tr><th>Rows</th><td>${r.total_sft_rows ?? 0}</td></tr>
+    <tr><th>Dataset</th><td>screen ${(r.dataset_counts||{}).screen_perception??0}, policy ${(r.dataset_counts||{}).action_policy??0}, verify ${(r.dataset_counts||{}).outcome_verifier??0}, img ${(r.dataset_counts||{}).images??0}</td></tr>
+    <tr><th>Remote</th><td>${r.remote_dir}</td></tr>
+    <tr><th>Local</th><td>${r.is_pulled_local?'yes':'no'}</td></tr>
+    <tr><th>Active</th><td>${r.is_health_adapter?'health server is using this adapter':'not active'}</td></tr>
+  </table>`;
+}
+
+async function loadRuns(){
+  const j=await api('/api/vlm/runs?limit=40');
+  REMOTE_RUNS=j.remote_runs||[];
+  const sel=qs('available_runs');
+  sel.innerHTML='';
+  for(const r of REMOTE_RUNS){
+    const opt=document.createElement('option');
+    opt.value=r.run_name;
+    opt.textContent=fmtRun(r);
+    if(r.is_health_adapter || r.is_active_run) opt.selected=true;
+    sel.appendChild(opt);
+  }
+  if(sel.value) qs('run_name').value=sel.value;
+  selectRunFromList();
+  status_out.textContent=JSON.stringify(j,null,2);
+}
+
+async function refresh(){
+  const j=await api('/api/vlm/status');
+  status_out.textContent=JSON.stringify(j,null,2);
+  const st=(j.state||{});
+  qs('mode').value=st.mode||'shadow';
+  qs('enabled').checked=!!st.enabled;
+  qs('allow_select').checked=!!st.allow_select;
+  qs('min_confidence').value=st.min_confidence??0.65;
+  qs('max_risk').value=st.max_risk??0.35;
+  qs('server_url').value=st.server_url||'http://10.79.85.35:8765';
+  if(st.active_run) qs('run_name').value=st.active_run;
+  await loadRuns();
+}
+async function saveConfig(){
+  policy_out.textContent=JSON.stringify(await api('/api/vlm/config',{
+    enabled:qs('enabled').checked,
+    mode:qs('mode').value,
+    allow_select:qs('allow_select').checked,
+    min_confidence:+qs('min_confidence').value,
+    max_risk:+qs('max_risk').value,
+    server_url:qs('server_url').value
+  }),null,2);
+  await refresh();
+}
+async function testPolicy(){
+  policy_out.textContent='testing...';
+  policy_out.textContent=JSON.stringify(await api('/api/vlm/policy/test',{}),null,2);
+}
+async function promote(){
+  status_out.textContent='promoting...';
+  status_out.textContent=JSON.stringify(await api('/api/vlm/adapter/promote',{run_name:qs('run_name').value,pull_local:true,restart_shadow:true}),null,2);
+  await refresh();
+}
+async function pullOnly(){
+  status_out.textContent=JSON.stringify(await api('/api/vlm/adapter/pull',{run_name:qs('run_name').value}),null,2);
+  await refresh();
+}
+refresh();
+</script>
+</body>
+</html>
+""", mimetype="text/html")
+
+
 @app.route("/api/crawl/start", methods=["POST"])
 def api_crawl_start():
+    CRAWLER_USER_STOP_REQUESTED.clear()
     data = request.get_json(silent=True) or {}
     try:
         return jsonify(crawler.start(data))
@@ -1452,6 +2109,7 @@ def api_crawl_start():
 
 @app.route("/api/crawl/stop", methods=["POST", "GET"])
 def api_crawl_stop():
+    CRAWLER_USER_STOP_REQUESTED.set()
     return jsonify(crawler.stop())
 
 
@@ -1549,7 +2207,7 @@ input,textarea { background:#0b1016; color:#e5edf5; border:1px solid #3b4450; bo
 </style>
 </head>
 <body>
-<header><div><b>Teacher Mode</b> <span class="pill">STB: __ALIAS__</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a> · <a href="/channel_surf" style="color:#93c5fd">channel surf</a> · <a href="/ppv" style="color:#93c5fd">ppv lab</a> · <a href="/dashboards" style="color:#93c5fd">dashboards</a></div><div id="pill" class="pill inactive">idle</div></header>
+<header><div><b>Teacher Mode</b> <span class="pill">STB: __ALIAS__</span> <a href="/monitor" style="color:#93c5fd">monitor</a> · <a href="/vlm_control" style="color:#93c5fd">vlm control</a> · <a href="/intelligence" style="color:#93c5fd">intelligence</a> · <a href="/channel_surf" style="color:#93c5fd">channel surf</a> · <a href="/ppv" style="color:#93c5fd">ppv lab</a> · <a href="/dashboards" style="color:#93c5fd">dashboards</a></div><div id="pill" class="pill inactive">idle</div></header>
 <main>
 <section class="card"><img class="stream" src="/video.mjpg"><h3>Recent demonstrated transitions</h3><div id="recent"></div></section>
 <aside class="card">

@@ -1345,13 +1345,7 @@ class CrawlerBrain:
         }
 
     def save(self) -> None:
-        tmp = self.path.with_suffix(".tmp")
-        payload = self.to_dict()
-        if self.compact_save:
-            tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        else:
-            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        atomic_write_json(self.path, self.to_dict(), compact=False, indent=2)
 
     def reset(self) -> None:
         self.action_timing.clear()

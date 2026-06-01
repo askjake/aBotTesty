@@ -1,0 +1,14 @@
+{
+  "schema": "ppv_purchase_limits_v1",
+  "updated_at": "2026-06-01T17:52:57+00:00",
+  "individual_limit": null,
+  "session_limit": null,
+  "session_spent": 0.0,
+  "pending_purchase": {
+    "title": "e sets sgn arg ses} a *",
+    "updated_at": "2026-06-01T17:52:57+00:00",
+    "amount": 0.0,
+    "price_text": "$0.00",
+    "category": "free"
+  }
+}

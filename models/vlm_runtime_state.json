@@ -1,0 +1,79 @@
+{
+  "enabled": true,
+  "mode": "assist",
+  "server_url": "http://10.79.85.35:8765",
+  "active_run": "abot_vlm_20260529_104826",
+  "active_adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260529_104826/outputs/abot_vlm_20260529_104826",
+  "base_model": "Qwen/Qwen3-VL-8B-Instruct",
+  "min_confidence": 0.65,
+  "max_risk": 0.35,
+  "allow_select": true,
+  "timeout_s": 30.0,
+  "last_update": "2026-06-01T14:35:05-0600",
+  "last_health": {
+    "ok": true,
+    "base_model": "Qwen/Qwen3-VL-8B-Instruct",
+    "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260529_104826/outputs/abot_vlm_20260529_104826",
+    "uptime_s": 251332.2,
+    "cuda_available": true,
+    "gpu_count": 1,
+    "http_status": 200,
+    "server_url": "http://10.79.85.35:8765"
+  },
+  "last_policy": {
+    "ok": true,
+    "enabled": true,
+    "mode": "assist",
+    "accepted": true,
+    "suggested_action": "down",
+    "action_sequence": [
+      "down"
+    ],
+    "reason": "accepted",
+    "confidence": 0.7238,
+    "risk": "safe",
+    "raw": {
+      "action_sequence": [
+        "down"
+      ],
+      "expected_result": "arrive at or focus VEN",
+      "risk": "safe",
+      "confidence": 0.7238
+    },
+    "allowed_actions": [
+      "up",
+      "down",
+      "left",
+      "right",
+      "guide",
+      "back",
+      "home",
+      "info",
+      "select"
+    ],
+    "raw_suggested_action": "down",
+    "risk_score": 0.0,
+    "latency_s": 3.958,
+    "health_hint": {
+      "ok": true,
+      "base_model": "Qwen/Qwen3-VL-8B-Instruct",
+      "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260529_104826/outputs/abot_vlm_20260529_104826",
+      "uptime_s": 251332.2,
+      "cuda_available": true,
+      "gpu_count": 1,
+      "http_status": 200,
+      "server_url": "http://10.79.85.35:8765"
+    }
+  },
+  "stats": {
+    "calls": 0,
+    "accepted": 34,
+    "rejected": 6,
+    "errors": 0,
+    "shadow_logged": 15,
+    "assist_reordered": 15,
+    "autonomous_chosen": 3,
+    "last_error": "",
+    "last_latency_s": 3.958
+  }
+}

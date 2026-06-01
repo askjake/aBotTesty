@@ -1,0 +1,58 @@
+{
+  "job": {
+    "dataset_dir": "learning_datasets/latest",
+    "host": "10.79.85.35",
+    "user": "montjac",
+    "remote_root": "~/aBotTesty_vlm_jobs",
+    "model_name": "Qwen/Qwen3-VL-8B-Instruct",
+    "trainer": "llamafactory",
+    "run_name": "abot_vlm_20260528_122153",
+    "ssh_port": 22,
+    "dry_run": true,
+    "extra_env": {}
+  },
+  "archive": "/home/montjac/aBotTesty/vlm_jobs/abot_vlm_20260528_122153/dataset.tar.gz",
+  "train_script": "/home/montjac/aBotTesty/vlm_jobs/abot_vlm_20260528_122153/train_remote.sh",
+  "config": "/home/montjac/aBotTesty/vlm_jobs/abot_vlm_20260528_122153/train_config.yaml",
+  "commands": {
+    "mkdir": [
+      "ssh",
+      "-p",
+      "22",
+      "montjac@10.79.85.35",
+      "mkdir -p /home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153"
+    ],
+    "rsync_archive": [
+      "rsync",
+      "-az",
+      "-e",
+      "ssh -p 22",
+      "dataset.tar.gz",
+      "montjac@10.79.85.35:/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153/dataset.tar.gz"
+    ],
+    "rsync_scripts": [
+      "rsync",
+      "-az",
+      "-e",
+      "ssh -p 22",
+      "train_remote.sh",
+      "train_config.yaml",
+      "montjac@10.79.85.35:/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153/"
+    ],
+    "train": [
+      "ssh",
+      "-p",
+      "22",
+      "montjac@10.79.85.35",
+      "cd /home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153 && bash train_remote.sh"
+    ],
+    "tail_logs": [
+      "ssh",
+      "-p",
+      "22",
+      "montjac@10.79.85.35",
+      "tail -f /home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153/train.log"
+    ],
+    "remote_dir": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260528_122153"
+  }
+}
