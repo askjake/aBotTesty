@@ -92,3 +92,11 @@ crawler_data/
 models/vlm_adapters/
 models/vlm_jobs/
 learning_datasets/
+
+# Runtime data / generated outputs (do not track in git)
+channel_surf_log.json
+crawler_brain.json
+learned_sequences.json
+CONTEXT_QA_REPORT_V11.json
+models/vlm_runtime_state.json
+vlm_jobs/
