@@ -1,6 +1,6 @@
 {
   "schema": "sequence_learner_v2",
-  "updated_at": "2026-06-01T20:50:33+00:00",
+  "updated_at": "2026-06-02T13:27:53+00:00",
   "learned_sequences": {
     "guide,down": {
       "sequence": [
@@ -35,28 +35,26 @@
         "down",
         "right"
       ],
-      "observations": 6,
+      "observations": 3,
       "success_rate": 0.0,
-      "avg_reward": 121.458,
+      "avg_reward": 47.583,
       "typical_context": [
-        "operator_after_20260527_091022_439358",
-        "teach_burst_after_7bba3f5dad",
-        "operator_before_20260527_085535_684109",
-        "teach_burst_after_d63878b62a",
-        "teach_burst_after_803280882b"
+        "before_2ff3d9d06b",
+        "before_2a91e1dbfb",
+        "screen_60dddb1b77"
       ],
       "leads_to": [
-        "operator_after_20260527_091022_439358",
-        "teach_burst_after_a6c0c9e0ba",
-        "teach_burst_after_d63878b62a"
+        "after_3e8f59932a",
+        "after_9ecd5b94f6",
+        "after_aaa52c218e"
       ],
-      "avg_time_s": 28.347,
+      "avg_time_s": 33.542,
       "last_used": null,
-      "confidence": 1.0,
+      "confidence": 0.375,
       "source_counts": {
-        "manual_teaching_fast": 12
+        "autonomous": 6
       },
-      "demonstration_weight": 3.0
+      "demonstration_weight": 1.0
     },
     "live,guide": {
       "sequence": [
@@ -395,21 +393,24 @@
       ],
       "observations": 3,
       "success_rate": 0.0,
-      "avg_reward": 116.458,
+      "avg_reward": 43.333,
       "typical_context": [
-        "operator_after_20260527_091022_439358",
-        "teach_burst_after_bdeedc69f7"
+        "screen_acc5dbfeba",
+        "before_6c0900b5e1",
+        "screen_384de7ee9b"
       ],
       "leads_to": [
-        "operator_after_20260527_091022_439358"
+        "after_4b827f8498",
+        "teach_burst_after_ba89e9b812",
+        "after_e3e68a8f9e"
       ],
-      "avg_time_s": 26.347,
+      "avg_time_s": 74.774,
       "last_used": null,
-      "confidence": 1.0,
+      "confidence": 0.375,
       "source_counts": {
-        "manual_teaching_fast": 6
+        "autonomous": 6
       },
-      "demonstration_weight": 3.0
+      "demonstration_weight": 1.0
     },
     "right,right,info": {
       "sequence": [
@@ -488,9 +489,9 @@
         "info",
         "back"
       ],
-      "observations": 9,
+      "observations": 11,
       "success_rate": 0.0,
-      "avg_reward": 39.056,
+      "avg_reward": 36.318,
       "typical_context": [
         "screen_61ef84feb5",
         "screen_35ab9aea0d",
@@ -511,11 +512,11 @@
         "after_complete_c5376ae3da",
         "after_complete_85852e4344"
       ],
-      "avg_time_s": 72.388,
+      "avg_time_s": 70.382,
       "last_used": null,
       "confidence": 1.0,
       "source_counts": {
-        "autonomous": 18
+        "autonomous": 22
       },
       "demonstration_weight": 1.0
     },
@@ -695,16 +696,17 @@
         "guide",
         "up"
       ],
-      "observations": 6,
+      "observations": 7,
       "success_rate": 0.0,
-      "avg_reward": 32.708,
+      "avg_reward": 33.179,
       "typical_context": [
         "before_fd963247f4",
         "before_7fde6bb7b4",
         "before_44b7bb9736",
         "before_4c09bbfdba",
         "teach_burst_after_c6d5306c91",
-        "before_464f852e25"
+        "before_464f852e25",
+        "screen_fe3224ca9f"
       ],
       "leads_to": [
         "after_complete_cd066bfe16",
@@ -712,13 +714,14 @@
         "before_91f21a563b",
         "after_77c1d5a92e",
         "after_c13baa7a84",
-        "after_f521d205b0"
+        "after_f521d205b0",
+        "after_9f8aa47c5a"
       ],
-      "avg_time_s": 84.218,
+      "avg_time_s": 83.921,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.875,
       "source_counts": {
-        "autonomous": 12
+        "autonomous": 14
       },
       "demonstration_weight": 1.0
     },
@@ -1004,24 +1007,26 @@
         "select",
         "back"
       ],
-      "observations": 2,
+      "observations": 3,
       "success_rate": 0.0,
-      "avg_reward": 128.438,
+      "avg_reward": 39.333,
       "typical_context": [
-        "teach_burst_after_e353cc000e",
-        "teach_burst_after_8dcb0818d8"
+        "screen_853c4912e0",
+        "before_3a361e7e29",
+        "before_e350f5dc73"
       ],
       "leads_to": [
-        "teach_burst_after_c71346cc6c",
-        "screen_85a47e91aa"
+        "screen_4bb42a2a3d",
+        "after_complete_4dfb937079",
+        "after_5b848d7d6b"
       ],
-      "avg_time_s": 20.833,
+      "avg_time_s": 64.654,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.375,
       "source_counts": {
-        "manual_teaching_fast": 4
+        "autonomous": 6
       },
-      "demonstration_weight": 3.0
+      "demonstration_weight": 1.0
     },
     "left,select,back": {
       "sequence": [
@@ -1104,9 +1109,9 @@
         "back",
         "home"
       ],
-      "observations": 10,
+      "observations": 13,
       "success_rate": 0.0,
-      "avg_reward": 45.2,
+      "avg_reward": 45.0,
       "typical_context": [
         "before_f2ee42eebb",
         "before_c2a8171837",
@@ -1127,11 +1132,11 @@
         "after_complete_141ba2aec1",
         "after_complete_18d30865ec"
       ],
-      "avg_time_s": 84.03,
+      "avg_time_s": 78.013,
       "last_used": null,
       "confidence": 1.0,
       "source_counts": {
-        "autonomous": 20
+        "autonomous": 26
       },
       "demonstration_weight": 1.0
     },
@@ -1241,16 +1246,17 @@
         "up",
         "right"
       ],
-      "observations": 6,
+      "observations": 7,
       "success_rate": 0.0,
-      "avg_reward": 50.083,
+      "avg_reward": 50.929,
       "typical_context": [
         "before_b54ee38c70",
         "before_5511cfc877",
         "before_5c0a950358",
         "before_536183e6c8",
         "screen_50b260b4b1",
-        "screen_072c6a72e9"
+        "screen_072c6a72e9",
+        "screen_11181677b7"
       ],
       "leads_to": [
         "after_complete_8cf101c4c5",
@@ -1258,13 +1264,14 @@
         "after_complete_ec99f5f73e",
         "after_e99c51523d",
         "after_ea7b9dda25",
-        "after_df24697ebb"
+        "after_df24697ebb",
+        "after_complete_08f2063daf"
       ],
-      "avg_time_s": 67.228,
+      "avg_time_s": 71.931,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.875,
       "source_counts": {
-        "autonomous": 12
+        "autonomous": 14
       },
       "demonstration_weight": 1.0
     },
@@ -1521,24 +1528,26 @@
         "down",
         "left"
       ],
-      "observations": 3,
+      "observations": 4,
       "success_rate": 0.0,
-      "avg_reward": 56.917,
+      "avg_reward": 51.188,
       "typical_context": [
         "before_82a10099a6",
         "before_4f17a39479",
-        "before_86356bd371"
+        "before_86356bd371",
+        "screen_968addb945"
       ],
       "leads_to": [
         "after_ceef0608f2",
         "after_56fc27dd7d",
-        "after_complete_f29f3bca12"
+        "after_complete_f29f3bca12",
+        "after_complete_2d1f6e2307"
       ],
-      "avg_time_s": 108.179,
+      "avg_time_s": 122.203,
       "last_used": null,
-      "confidence": 0.375,
+      "confidence": 0.5,
       "source_counts": {
-        "autonomous": 6
+        "autonomous": 8
       },
       "demonstration_weight": 1.0
     },
@@ -1810,16 +1819,17 @@
         "select",
         "down"
       ],
-      "observations": 6,
+      "observations": 7,
       "success_rate": 0.0,
-      "avg_reward": 47.833,
+      "avg_reward": 45.929,
       "typical_context": [
         "before_a22b629e44",
         "before_bc93e55157",
         "screen_fe12521362",
         "screen_cc7ed5a266",
         "screen_072c6a72e9",
-        "screen_044cfd8e80"
+        "screen_044cfd8e80",
+        "before_c02a22c456"
       ],
       "leads_to": [
         "after_complete_0ce727bcb5",
@@ -1827,13 +1837,14 @@
         "after_complete_aa4f634a31",
         "after_19c152058e",
         "after_complete_2cf9f0119f",
-        "after_d8207a42fc"
+        "after_d8207a42fc",
+        "screen_37efbc6fa0"
       ],
-      "avg_time_s": 74.927,
+      "avg_time_s": 81.057,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.875,
       "source_counts": {
-        "autonomous": 12
+        "autonomous": 14
       },
       "demonstration_weight": 1.0
     },
@@ -2456,28 +2467,30 @@
         "left",
         "right"
       ],
-      "observations": 5,
+      "observations": 6,
       "success_rate": 0.0,
-      "avg_reward": 51.3,
+      "avg_reward": 47.125,
       "typical_context": [
         "screen_476a174820",
         "screen_1ad8b1a255",
         "before_2533eac436",
         "screen_28716d4a4a",
-        "screen_384de7ee9b"
+        "screen_384de7ee9b",
+        "screen_4fcf37d2d3"
       ],
       "leads_to": [
         "teach_burst_after_056c816004",
         "after_edddb21f07",
         "screen_1a03f5900c",
         "after_febd7a2423",
-        "after_complete_85bf1542de"
+        "after_complete_85bf1542de",
+        "screen_cc7ed5a266"
       ],
-      "avg_time_s": 64.753,
+      "avg_time_s": 73.485,
       "last_used": null,
-      "confidence": 0.625,
+      "confidence": 0.75,
       "source_counts": {
-        "autonomous": 10
+        "autonomous": 12
       },
       "demonstration_weight": 1.0
     },
@@ -2486,22 +2499,24 @@
         "right",
         "up"
       ],
-      "observations": 2,
+      "observations": 3,
       "success_rate": 0.0,
-      "avg_reward": 43.0,
+      "avg_reward": 19.417,
       "typical_context": [
-        "before_9de96f7866",
-        "before_32f3000cb4"
+        "screen_8a2d8ba01d",
+        "screen_1284e6eafb",
+        "screen_cc7ed5a266"
       ],
       "leads_to": [
-        "after_fda945466d",
-        "after_8e53a0be32"
+        "after_357356396b",
+        "screen_50b260b4b1",
+        "screen_cc7ed5a266"
       ],
-      "avg_time_s": 25.733,
+      "avg_time_s": 97.634,
       "last_used": null,
-      "confidence": 0.25,
+      "confidence": 0.375,
       "source_counts": {
-        "autonomous": 4
+        "autonomous": 6
       },
       "demonstration_weight": 1.0
     },
@@ -2510,26 +2525,24 @@
         "up",
         "down"
       ],
-      "observations": 4,
+      "observations": 3,
       "success_rate": 0.0,
-      "avg_reward": 32.625,
+      "avg_reward": 53.583,
       "typical_context": [
-        "after_bf8e430566",
-        "before_43ae6e995f",
-        "screen_286292ab0d",
-        "before_cdeb91aaee"
+        "operator_before_20260527_145954_453979",
+        "screen_00b62c83cc",
+        "screen_fc12935be0"
       ],
       "leads_to": [
-        "after_da49f7a0b7",
-        "after_complete_009428e3fd",
-        "teach_start_cd482c9ba1",
-        "screen_a670db581e"
+        "after_c7117e89bf",
+        "after_complete_4ad91cfbe6",
+        "after_f00d385b90"
       ],
-      "avg_time_s": 27.555,
+      "avg_time_s": 97.679,
       "last_used": null,
-      "confidence": 0.5,
+      "confidence": 0.375,
       "source_counts": {
-        "autonomous": 8
+        "autonomous": 6
       },
       "demonstration_weight": 1.0
     },
@@ -3680,9 +3693,9 @@
         "back",
         "home"
       ],
-      "observations": 7,
+      "observations": 9,
       "success_rate": 0.0,
-      "avg_reward": 64.607,
+      "avg_reward": 59.583,
       "typical_context": [
         "screen_a8b69a2bc4",
         "screen_b797dd5560",
@@ -3690,7 +3703,8 @@
         "before_5e86cbd1b0",
         "screen_36838431c9",
         "before_1d67d2416a",
-        "screen_50b260b4b1"
+        "screen_50b260b4b1",
+        "screen_6c079012e0"
       ],
       "leads_to": [
         "after_1b328f8edb",
@@ -3699,13 +3713,14 @@
         "after_complete_141ba2aec1",
         "after_complete_18d30865ec",
         "after_087a9bf427",
-        "after_611a33b5e2"
+        "after_611a33b5e2",
+        "after_a7e34a26d8"
       ],
-      "avg_time_s": 115.101,
+      "avg_time_s": 110.974,
       "last_used": null,
-      "confidence": 0.875,
+      "confidence": 1.0,
       "source_counts": {
-        "autonomous": 21
+        "autonomous": 27
       },
       "demonstration_weight": 1.0
     },
@@ -8122,16 +8137,17 @@
         "down",
         "up"
       ],
-      "observations": 6,
+      "observations": 7,
       "success_rate": 0.0,
-      "avg_reward": 38.708,
+      "avg_reward": 41.071,
       "typical_context": [
         "screen_6c079012e0",
         "before_a727e6f5b5",
         "before_d1b2d9ce1c",
         "screen_8a2d8ba01d",
         "before_bd2b3c0bfc",
-        "screen_50b260b4b1"
+        "screen_50b260b4b1",
+        "before_c8439b4dd1"
       ],
       "leads_to": [
         "after_41623c728e",
@@ -8139,13 +8155,14 @@
         "screen_31bfbcfa9c",
         "after_ec3e0a28b2",
         "screen_9546cdfca2",
-        "after_complete_97b624e9dd"
+        "after_complete_97b624e9dd",
+        "after_complete_cb0af98ffd"
       ],
-      "avg_time_s": 97.665,
+      "avg_time_s": 95.333,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.875,
       "source_counts": {
-        "autonomous": 12
+        "autonomous": 14
       },
       "demonstration_weight": 1.0
     },
@@ -9512,9 +9529,9 @@
         "home",
         "guide"
       ],
-      "observations": 15,
+      "observations": 18,
       "success_rate": 0.0,
-      "avg_reward": 42.65,
+      "avg_reward": 40.986,
       "typical_context": [
         "after_complete_b18de97789",
         "screen_a14db7a310",
@@ -9535,11 +9552,11 @@
         "after_ea742fdb34",
         "after_complete_12f3c06312"
       ],
-      "avg_time_s": 82.964,
+      "avg_time_s": 85.799,
       "last_used": null,
       "confidence": 1.0,
       "source_counts": {
-        "autonomous": 30
+        "autonomous": 36
       },
       "demonstration_weight": 1.0
     },
@@ -9549,28 +9566,30 @@
         "up",
         "right"
       ],
-      "observations": 5,
+      "observations": 6,
       "success_rate": 0.0,
-      "avg_reward": 68.3,
+      "avg_reward": 70.875,
       "typical_context": [
         "screen_6c079012e0",
         "before_a727e6f5b5",
         "before_d1b2d9ce1c",
         "before_bd2b3c0bfc",
-        "screen_50b260b4b1"
+        "screen_50b260b4b1",
+        "before_c8439b4dd1"
       ],
       "leads_to": [
         "after_complete_8cf101c4c5",
         "after_complete_ec7511bc40",
         "after_complete_ec99f5f73e",
         "after_ea7b9dda25",
-        "after_df24697ebb"
+        "after_df24697ebb",
+        "after_complete_08f2063daf"
       ],
-      "avg_time_s": 130.96,
+      "avg_time_s": 128.499,
       "last_used": null,
-      "confidence": 0.625,
+      "confidence": 0.75,
       "source_counts": {
-        "autonomous": 15
+        "autonomous": 18
       },
       "demonstration_weight": 1.0
     },
@@ -9796,9 +9815,9 @@
         "left",
         "info"
       ],
-      "observations": 8,
+      "observations": 9,
       "success_rate": 0.0,
-      "avg_reward": 40.594,
+      "avg_reward": 39.556,
       "typical_context": [
         "before_658b1e4943",
         "screen_85a47e91aa",
@@ -9817,11 +9836,11 @@
         "after_f498a8f8d6",
         "after_96908979e0"
       ],
-      "avg_time_s": 69.717,
+      "avg_time_s": 69.317,
       "last_used": null,
       "confidence": 1.0,
       "source_counts": {
-        "autonomous": 16
+        "autonomous": 18
       },
       "demonstration_weight": 1.0
     },
@@ -9889,9 +9908,9 @@
         "home",
         "guide"
       ],
-      "observations": 7,
+      "observations": 10,
       "success_rate": 0.0,
-      "avg_reward": 65.393,
+      "avg_reward": 62.55,
       "typical_context": [
         "screen_a8b69a2bc4",
         "screen_4483782945",
@@ -9899,20 +9918,22 @@
         "screen_17cbce08cf",
         "before_a4f6b1ab57",
         "before_729a891584",
-        "before_6f1dd19066"
+        "before_6f1dd19066",
+        "before_2b9c19d4b6"
       ],
       "leads_to": [
         "after_complete_6c6d0dd653",
         "teach_burst_after_c6d5306c91",
         "after_complete_af16facbd7",
         "after_9940c0144a",
-        "after_complete_828d3097e0"
+        "after_complete_828d3097e0",
+        "screen_f0b88e2f02"
       ],
-      "avg_time_s": 134.542,
+      "avg_time_s": 129.659,
       "last_used": null,
-      "confidence": 0.875,
+      "confidence": 1.0,
       "source_counts": {
-        "autonomous": 21
+        "autonomous": 30
       },
       "demonstration_weight": 1.0
     },
@@ -9922,16 +9943,17 @@
         "guide",
         "up"
       ],
-      "observations": 6,
+      "observations": 7,
       "success_rate": 0.0,
-      "avg_reward": 55.083,
+      "avg_reward": 53.643,
       "typical_context": [
         "before_01ee4eaaf5",
         "screen_fe12521362",
         "before_e074eb5b7c",
         "screen_361fc29d36",
         "before_1faea0a23d",
-        "before_c72e33ef02"
+        "before_c72e33ef02",
+        "before_85612ff5fa"
       ],
       "leads_to": [
         "after_complete_cd066bfe16",
@@ -9939,13 +9961,14 @@
         "before_91f21a563b",
         "after_77c1d5a92e",
         "after_c13baa7a84",
-        "after_f521d205b0"
+        "after_f521d205b0",
+        "after_9f8aa47c5a"
       ],
-      "avg_time_s": 130.906,
+      "avg_time_s": 132.064,
       "last_used": null,
-      "confidence": 0.75,
+      "confidence": 0.875,
       "source_counts": {
-        "autonomous": 18
+        "autonomous": 21
       },
       "demonstration_weight": 1.0
     },
@@ -10014,9 +10037,9 @@
         "home",
         "guide"
       ],
-      "observations": 7,
+      "observations": 9,
       "success_rate": 0.0,
-      "avg_reward": 83.429,
+      "avg_reward": 75.806,
       "typical_context": [
         "screen_a8b69a2bc4",
         "screen_b797dd5560",
@@ -10024,7 +10047,8 @@
         "before_5e86cbd1b0",
         "screen_36838431c9",
         "before_1d67d2416a",
-        "screen_50b260b4b1"
+        "screen_50b260b4b1",
+        "screen_6c079012e0"
       ],
       "leads_to": [
         "after_complete_6c6d0dd653",
@@ -10033,11 +10057,11 @@
         "after_9940c0144a",
         "after_complete_828d3097e0"
       ],
-      "avg_time_s": 162.642,
+      "avg_time_s": 161.568,
       "last_used": null,
-      "confidence": 0.875,
+      "confidence": 1.0,
       "source_counts": {
-        "autonomous": 28
+        "autonomous": 36
       },
       "demonstration_weight": 1.0
     },
@@ -10048,26 +10072,28 @@
         "guide",
         "up"
       ],
-      "observations": 4,
+      "observations": 5,
       "success_rate": 0.0,
-      "avg_reward": 78.125,
+      "avg_reward": 75.2,
       "typical_context": [
         "screen_a8b69a2bc4",
         "screen_4483782945",
         "before_d9a27806cd",
-        "screen_17cbce08cf"
+        "screen_17cbce08cf",
+        "teach_burst_after_ba89e9b812"
       ],
       "leads_to": [
         "after_complete_cd066bfe16",
         "screen_16ab4e3417",
         "after_c13baa7a84",
-        "after_f521d205b0"
+        "after_f521d205b0",
+        "after_9f8aa47c5a"
       ],
-      "avg_time_s": 187.326,
+      "avg_time_s": 181.525,
       "last_used": null,
-      "confidence": 0.5,
+      "confidence": 0.625,
       "source_counts": {
-        "autonomous": 16
+        "autonomous": 20
       },
       "demonstration_weight": 1.0
     },
@@ -10111,26 +10137,28 @@
         "guide",
         "up"
       ],
-      "observations": 4,
+      "observations": 5,
       "success_rate": 0.0,
-      "avg_reward": 90.812,
+      "avg_reward": 83.95,
       "typical_context": [
         "screen_a8b69a2bc4",
         "screen_b797dd5560",
         "before_d05ae31a95",
-        "before_5e86cbd1b0"
+        "before_5e86cbd1b0",
+        "screen_cc7ed5a266"
       ],
       "leads_to": [
         "after_complete_cd066bfe16",
         "screen_16ab4e3417",
         "after_c13baa7a84",
-        "after_f521d205b0"
+        "after_f521d205b0",
+        "after_9f8aa47c5a"
       ],
-      "avg_time_s": 226.313,
+      "avg_time_s": 225.971,
       "last_used": null,
-      "confidence": 0.5,
+      "confidence": 0.625,
       "source_counts": {
-        "autonomous": 20
+        "autonomous": 25
       },
       "demonstration_weight": 1.0
     },
@@ -10139,26 +10167,28 @@
         "right",
         "left"
       ],
-      "observations": 4,
+      "observations": 5,
       "success_rate": 0.0,
-      "avg_reward": 52.188,
+      "avg_reward": 51.75,
       "typical_context": [
         "screen_f1177bbf33",
         "before_ef4293b09a",
         "screen_28716d4a4a",
-        "screen_384de7ee9b"
+        "screen_384de7ee9b",
+        "screen_12a16f3e3d"
       ],
       "leads_to": [
         "after_dc6662928b",
         "after_2e4431d0f1",
         "after_complete_8e75100743",
-        "after_2f6187d95b"
+        "after_2f6187d95b",
+        "after_a71a8bec58"
       ],
-      "avg_time_s": 47.97,
+      "avg_time_s": 44.804,
       "last_used": null,
-      "confidence": 0.5,
+      "confidence": 0.625,
       "source_counts": {
-        "autonomous": 8
+        "autonomous": 10
       },
       "demonstration_weight": 1.0
     },
@@ -10277,24 +10307,26 @@
         "down",
         "up"
       ],
-      "observations": 3,
+      "observations": 4,
       "success_rate": 0.0,
-      "avg_reward": 68.0,
+      "avg_reward": 70.812,
       "typical_context": [
         "before_a22b629e44",
         "before_bc93e55157",
-        "screen_072c6a72e9"
+        "screen_072c6a72e9",
+        "screen_044cfd8e80"
       ],
       "leads_to": [
         "after_41623c728e",
         "after_cb39d36379",
-        "after_complete_97b624e9dd"
+        "after_complete_97b624e9dd",
+        "after_complete_cb0af98ffd"
       ],
-      "avg_time_s": 114.806,
+      "avg_time_s": 109.826,
       "last_used": null,
-      "confidence": 0.375,
+      "confidence": 0.5,
       "source_counts": {
-        "autonomous": 9
+        "autonomous": 12
       },
       "demonstration_weight": 1.0
     },
@@ -10333,25 +10365,26 @@
         "left",
         "info"
       ],
-      "observations": 4,
+      "observations": 5,
       "success_rate": 0.0,
-      "avg_reward": 68.562,
+      "avg_reward": 66.2,
       "typical_context": [
         "screen_f1177bbf33",
         "before_ef4293b09a",
         "screen_28716d4a4a",
-        "screen_384de7ee9b"
+        "screen_384de7ee9b",
+        "screen_12a16f3e3d"
       ],
       "leads_to": [
         "after_cddec11f68",
         "teach_burst_after_ba89e9b812",
         "after_96908979e0"
       ],
-      "avg_time_s": 68.761,
+      "avg_time_s": 71.172,
       "last_used": null,
-      "confidence": 0.5,
+      "confidence": 0.625,
       "source_counts": {
-        "autonomous": 12
+        "autonomous": 15
       },
       "demonstration_weight": 1.0
     },
@@ -10362,33 +10395,147 @@
         "up",
         "right"
       ],
-      "observations": 3,
+      "observations": 4,
       "success_rate": 0.0,
-      "avg_reward": 94.583,
+      "avg_reward": 97.875,
       "typical_context": [
         "before_a22b629e44",
         "before_bc93e55157",
-        "screen_072c6a72e9"
+        "screen_072c6a72e9",
+        "screen_044cfd8e80"
       ],
       "leads_to": [
         "after_complete_8cf101c4c5",
         "after_complete_ec7511bc40",
-        "after_df24697ebb"
+        "after_df24697ebb",
+        "after_complete_08f2063daf"
       ],
-      "avg_time_s": 142.206,
+      "avg_time_s": 139.089,
+      "last_used": null,
+      "confidence": 0.5,
+      "source_counts": {
+        "autonomous": 16
+      },
+      "demonstration_weight": 1.0
+    },
+    "guide,up,down": {
+      "sequence": [
+        "guide",
+        "up",
+        "down"
+      ],
+      "observations": 3,
+      "success_rate": 0.0,
+      "avg_reward": 70.0,
+      "typical_context": [
+        "before_fd963247f4",
+        "before_4c09bbfdba",
+        "screen_fe3224ca9f"
+      ],
+      "leads_to": [
+        "after_c7117e89bf",
+        "after_complete_4ad91cfbe6",
+        "after_f00d385b90"
+      ],
+      "avg_time_s": 149.949,
+      "last_used": null,
+      "confidence": 0.375,
+      "source_counts": {
+        "autonomous": 9
+      },
+      "demonstration_weight": 1.0
+    },
+    "left,select,down,up": {
+      "sequence": [
+        "left",
+        "select",
+        "down",
+        "up"
+      ],
+      "observations": 3,
+      "success_rate": 0.0,
+      "avg_reward": 93.5,
+      "typical_context": [
+        "before_a371934622",
+        "before_a54e95d204",
+        "screen_50b260b4b1"
+      ],
+      "leads_to": [
+        "after_41623c728e",
+        "after_cb39d36379",
+        "after_complete_cb0af98ffd"
+      ],
+      "avg_time_s": 118.034,
       "last_used": null,
       "confidence": 0.375,
       "source_counts": {
         "autonomous": 12
       },
       "demonstration_weight": 1.0
+    },
+    "home,guide,up,down": {
+      "sequence": [
+        "home",
+        "guide",
+        "up",
+        "down"
+      ],
+      "observations": 3,
+      "success_rate": 0.0,
+      "avg_reward": 91.833,
+      "typical_context": [
+        "before_01ee4eaaf5",
+        "screen_361fc29d36",
+        "before_85612ff5fa"
+      ],
+      "leads_to": [
+        "after_c7117e89bf",
+        "after_complete_4ad91cfbe6",
+        "after_f00d385b90"
+      ],
+      "avg_time_s": 191.733,
+      "last_used": null,
+      "confidence": 0.375,
+      "source_counts": {
+        "autonomous": 12
+      },
+      "demonstration_weight": 1.0
+    },
+    "left,select,down,up,right": {
+      "sequence": [
+        "left",
+        "select",
+        "down",
+        "up",
+        "right"
+      ],
+      "observations": 3,
+      "success_rate": 0.0,
+      "avg_reward": 120.083,
+      "typical_context": [
+        "before_a371934622",
+        "before_a54e95d204",
+        "screen_50b260b4b1"
+      ],
+      "leads_to": [
+        "after_complete_8cf101c4c5",
+        "after_complete_ec7511bc40",
+        "after_complete_08f2063daf"
+      ],
+      "avg_time_s": 151.572,
+      "last_used": null,
+      "confidence": 0.375,
+      "source_counts": {
+        "autonomous": 15
+      },
+      "demonstration_weight": 1.0
     }
   },
   "stats": {
-    "total_sequences": 383,
-    "history_size": 168,
-    "total_mined": 51559,
-    "suggestions_made": 29,
+    "total_sequences": 387,
+    "history_size": 1,
+    "total_mined": 51616,
+    "suggestions_made": 33,
     "successful_suggestions": 0,
     "top_sequences": [
       {
@@ -10612,6 +10759,6 @@
         "demonstration_weight": 4.0
       }
     ],
-    "demonstration_sequences": 280
+    "demonstration_sequences": 277
   }
 }

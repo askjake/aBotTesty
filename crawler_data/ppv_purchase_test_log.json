@@ -1,6 +1,6 @@
 {
   "schema": "ppv_purchase_test_log_v1",
-  "updated_at": "2026-06-01T15:12:35+00:00",
+  "updated_at": "2026-06-02T13:18:35+00:00",
   "events": [
     {
       "ts": "2026-05-27T15:05:46+00:00",
@@ -22201,6 +22201,144 @@
         "pending_purchase": {
           "title": "9:12a > bk - - r _ ad ee) hh Ce) 3 \"Lee \"yy, Sew\" _ Oe te --S",
           "updated_at": "2026-06-01T15:12:35+00:00",
+          "amount": 0.0,
+          "price_text": "$0.00",
+          "category": "free"
+        },
+        "limits_file": "/home/montjac/aBotTesty/crawler_data/ppv_purchase_limits.json"
+      }
+    },
+    {
+      "ts": "2026-06-02T13:18:35+00:00",
+      "type": "operator_purchase_observation",
+      "source": "operator_monitor_async",
+      "key": "back",
+      "before_purchase_flow": {
+        "schema": "purchase_flow_v2_region_time",
+        "screen_stage": "loading",
+        "stage_order": 0,
+        "is_purchase_context": false,
+        "asset_type": "",
+        "asset_title": "",
+        "episode_title": "",
+        "displayed_time": "",
+        "display_time_context": {
+          "found": false,
+          "displayed": "",
+          "displayed_iso": "",
+          "actual_iso": "2026-06-02T07:18:35-06:00",
+          "drift_minutes": null,
+          "source": "",
+          "confidence": 0.0,
+          "severity": "unknown",
+          "flags": [
+            "display_clock_not_found"
+          ],
+          "candidates": []
+        },
+        "prices": [],
+        "price": "",
+        "pricing": {
+          "found": false,
+          "amount": null,
+          "price_text": "",
+          "currency": "USD",
+          "category": "unknown",
+          "all_amounts": [],
+          "confidence": 0.0,
+          "flags": []
+        },
+        "purchase_price": null,
+        "purchase_price_text": "",
+        "purchase_cost_category": "unknown",
+        "is_free": false,
+        "is_paid": false,
+        "availability": "",
+        "confidence": 0.25,
+        "confirm_like": false,
+        "cancel_like": false,
+        "flags": [
+          "display_clock_not_found"
+        ],
+        "ocr_excerpt": "Ries : . \u00a2 ~ Pd nol 5 4 2 ; <a Se es . .? , ' vel . acho BS 2 i = -_ Ie . *, 3) aD ae \" ; . <n . ae mee A : ee ea - be all sli STs he es 3 , Con S ps > \"3 _- = i. . - a - Fi fy w \u2122 , . ~* y >\u00bb Pa a at. \u00ab - pas ; - > Se a ie oe ae Ya - SS ih ee tS a4 + a ri a * se oo He oe. tee =: ak opie / a eS ee Bae\" <a L AN : : aaa Pe Sn cates . = be th ae ro ty F ; > Cr\". hv - et a. - os ae _ EG Se, Stee ay te - ws re > i < '2 . _ ae i WS > ~~ Se ; ~~ ee aie ee = ee Te SS ig Ree ee ca al oe : Se Chee Pn . tage de ge OO ae ee Lys 1 ] } s he a '2 . Wroas 223 - md = we TTPel iid Fp : \"4 \u00bb + tw. ' i i | eS ai ees a : : \\e 7 a - | tage iy) ae ya ee a _ . - : = ad - \\ tans Lia Qe See eee. Se Sirf) > + a = vil = pe ' ae ht > a ee wo : eS VS jue 78 8 Oe a oe f pg eae el =e aT A etiek luego ay 2 Ulla +) : ) 7 a Ha a rE on . Vo ote os = vas me c a j er - _ ae ~ 4 eg 2 | : * i) ae iF Sy eS oe Rag ecm a ae a eo ",
+        "ok": true,
+        "ts": "2026-06-02T13:18:35+00:00",
+        "source": "operator_monitor_async:before",
+        "is_ppv_context": false,
+        "title_guess": "",
+        "screenshot": "states/operator_before_20260602_071722_290757_20260602_071722_291926.jpg",
+        "armed": false
+      },
+      "purchase_flow": {
+        "schema": "purchase_flow_v2_region_time",
+        "screen_stage": "purchase_confirmation",
+        "stage_order": 5,
+        "is_purchase_context": true,
+        "asset_type": "on_demand",
+        "asset_title": "eo ee &",
+        "episode_title": "",
+        "displayed_time": "",
+        "display_time_context": {
+          "found": false,
+          "displayed": "",
+          "displayed_iso": "",
+          "actual_iso": "2026-06-02T07:18:35-06:00",
+          "drift_minutes": null,
+          "source": "",
+          "confidence": 0.0,
+          "severity": "unknown",
+          "flags": [
+            "display_clock_not_found"
+          ],
+          "candidates": []
+        },
+        "prices": [],
+        "price": "",
+        "pricing": {
+          "found": false,
+          "amount": null,
+          "price_text": "",
+          "currency": "USD",
+          "category": "unknown",
+          "all_amounts": [],
+          "confidence": 0.0,
+          "flags": []
+        },
+        "purchase_price": null,
+        "purchase_price_text": "",
+        "purchase_cost_category": "unknown",
+        "is_free": false,
+        "is_paid": false,
+        "availability": "",
+        "confidence": 1.0,
+        "confirm_like": true,
+        "cancel_like": true,
+        "flags": [
+          "final_confirmation_screen",
+          "display_clock_not_found"
+        ],
+        "ocr_excerpt": "eS * . ~ i att - no ' | | vl ; \\ ire: - bo ; : Be oe es ew Ps we.) 2. y \u00bb pe ee Fe oe >: op WY . sgt a > he P _* A } ng , ' hn TI - 4 cee - = ee ee het a S i y q rad Tr V7) - ~~) oe wy \u00bb se + > a ; ste a an ee Pa \" ('Asst .= a aa >< a\" : : a 'Cs . <\" s eae Ps eet > AR. Pn ait ee <_< nae Sess: i+) oh , eR. | ee es SE re s eae sR a Ta a ES TY Tad te ce AY - ie on, he ie ee Wes o ie 2 heed i. Pa. a . ~~ * Se eS 2 tS ee : -- > Sie es - . pi a ee a ae Ee . Send ne. See rn a \" pe in 3 F: -e ae : <a ee . | + = Sa LLU? th] 3 BION NYT Sl | BEACKS t08; , a --n TPP Lid , ee '4 b , 1 y i Ap qo _ a it NS aa / >\u00bb: ed ry a -- : 2 . * > ar Pome ern Le - i. a\" le ek Sea De od Le a ST hs RA, : 7 ~~ Py ~~ > vy . ae \u00a5.. . fs tS z oo oe 4 a eee ~ re, 7 rs ae ee 7 > by ty << SS ae a yee ps yee. AL 7 smeeae ' gus reat 0 aa Be 'a2 is ea elu | es Elk ie & & RE ea er i ee @ 4 0 a, =. ae ye. + 3 S 4 y gag ee diya ",
+        "ok": true,
+        "ts": "2026-06-02T13:18:35+00:00",
+        "source": "operator_monitor_async:after",
+        "is_ppv_context": true,
+        "title_guess": "eo ee &",
+        "screenshot": "states/operator_after_20260602_071754_188156_20260602_071754_188927.jpg",
+        "armed": false
+      },
+      "screenshot": "states/operator_after_20260602_071754_188156_20260602_071754_188927.jpg",
+      "limits": {
+        "individual_limit": null,
+        "individual_limit_label": "unlimited",
+        "session_limit": null,
+        "session_limit_label": "unlimited",
+        "session_spent": 0.0,
+        "session_spent_label": "$0.00",
+        "session_remaining": null,
+        "session_remaining_label": "unlimited",
+        "pending_purchase": {
+          "title": "eo ee &",
+          "updated_at": "2026-06-02T13:18:35+00:00",
           "amount": 0.0,
           "price_text": "$0.00",
           "category": "free"
