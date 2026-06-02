@@ -9,12 +9,12 @@
   "max_risk": 0.35,
   "allow_select": true,
   "timeout_s": 30.0,
-  "last_update": "2026-06-02T07:27:28-0600",
+  "last_update": "2026-06-02T07:34:40-0600",
   "last_health": {
     "ok": true,
     "base_model": "Qwen/Qwen3-VL-8B-Instruct",
     "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260601_154726/outputs/abot_vlm_20260601_154726",
-    "uptime_s": 257.7,
+    "uptime_s": 662.8,
     "cuda_available": true,
     "gpu_count": 1,
     "http_status": 200,
@@ -25,16 +25,16 @@
     "enabled": true,
     "mode": "assist",
     "accepted": true,
-    "suggested_action": "down",
+    "suggested_action": "left",
     "action_sequence": [
-      "down"
+      "left"
     ],
     "reason": "accepted",
     "confidence": 0.7238,
     "risk": "safe",
     "raw": {
       "action_sequence": [
-        "down"
+        "left"
       ],
       "expected_result": "arrive at or focus VEN",
       "risk": "safe",
@@ -49,16 +49,22 @@
       "back",
       "home",
       "info",
-      "select"
+      "select",
+      "live",
+      "recall",
+      "input",
+      "diamond",
+      "ddiamond",
+      "options"
     ],
-    "raw_suggested_action": "down",
+    "raw_suggested_action": "left",
     "risk_score": 0.0,
-    "latency_s": 3.958,
+    "latency_s": 4.35,
     "health_hint": {
       "ok": true,
       "base_model": "Qwen/Qwen3-VL-8B-Instruct",
-      "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260529_104826/outputs/abot_vlm_20260529_104826",
-      "uptime_s": 251332.2,
+      "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260601_154726/outputs/abot_vlm_20260601_154726",
+      "uptime_s": 662.8,
       "cuda_available": true,
       "gpu_count": 1,
       "http_status": 200,
@@ -67,13 +73,13 @@
   },
   "stats": {
     "calls": 0,
-    "accepted": 34,
+    "accepted": 35,
     "rejected": 6,
     "errors": 0,
     "shadow_logged": 15,
-    "assist_reordered": 15,
+    "assist_reordered": 16,
     "autonomous_chosen": 3,
     "last_error": "",
-    "last_latency_s": 3.958
+    "last_latency_s": 4.35
   }
 }

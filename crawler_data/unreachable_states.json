@@ -1,6 +1,6 @@
 {
   "schema": "persistence_tracker_v2",
-  "updated_at": "2026-06-02T13:27:53+00:00",
+  "updated_at": "2026-06-02T13:38:22+00:00",
   "unreachable_states": {
     "after_complete_204eeb8d07": {
       "state_id": "after_complete_204eeb8d07",
@@ -1634,7 +1634,7 @@
     "teach_burst_after_9a414be7df": {
       "state_id": "teach_burst_after_9a414be7df",
       "first_attempt": "2026-05-27T19:38:49+00:00",
-      "last_attempt": "2026-06-02T13:21:19+00:00",
+      "last_attempt": "2026-06-02T13:38:22+00:00",
       "failed_routes": [
         [],
         [],
@@ -1649,7 +1649,7 @@
         [],
         []
       ],
-      "attempts": 80,
+      "attempts": 81,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -3762,7 +3762,7 @@
     "operator_after_20260527_091022_439358": {
       "state_id": "operator_after_20260527_091022_439358",
       "first_attempt": "2026-05-27T20:39:40+00:00",
-      "last_attempt": "2026-06-02T13:18:48+00:00",
+      "last_attempt": "2026-06-02T13:36:49+00:00",
       "failed_routes": [
         [],
         [],
@@ -3777,7 +3777,7 @@
         [],
         []
       ],
-      "attempts": 80,
+      "attempts": 81,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -3874,7 +3874,7 @@
     "teach_burst_after_7de19bf14a": {
       "state_id": "teach_burst_after_7de19bf14a",
       "first_attempt": "2026-05-27T20:42:47+00:00",
-      "last_attempt": "2026-06-02T13:20:13+00:00",
+      "last_attempt": "2026-06-02T13:38:03+00:00",
       "failed_routes": [
         [],
         [],
@@ -3889,7 +3889,7 @@
         [],
         []
       ],
-      "attempts": 71,
+      "attempts": 72,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -4210,7 +4210,7 @@
     "operator_after_20260527_130001_669050": {
       "state_id": "operator_after_20260527_130001_669050",
       "first_attempt": "2026-05-27T21:24:47+00:00",
-      "last_attempt": "2026-06-02T13:19:24+00:00",
+      "last_attempt": "2026-06-02T13:37:16+00:00",
       "failed_routes": [
         [],
         [],
@@ -4225,7 +4225,7 @@
         [],
         []
       ],
-      "attempts": 69,
+      "attempts": 70,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -105687,7 +105687,7 @@
   },
   "stats": {
     "total_unreachable": 5603,
-    "total_failures_tracked": 19474,
+    "total_failures_tracked": 19478,
     "total_retries_attempted": 0,
     "successful_retries": 38,
     "top_unreachable": [
