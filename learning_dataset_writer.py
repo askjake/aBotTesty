@@ -48,6 +48,8 @@ RISK_TEXT_RX = re.compile(
     re.I,
 )
 
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -251,22 +253,35 @@ class LearningDatasetWriter:
                 ],
                 "safety_note": "Phase 1 only exports data. It does not allow a model to press remote keys.",
             }
+            manifest["trainable"] = bool(
+                int(sft_counts.get("screen_perception") or 0) > 0
+                and int(manifest.get("image_count") or 0) > 0
+            )
+            manifest["ok"] = bool(manifest["trainable"])
+            if not manifest["trainable"]:
+                manifest["export_warning"] = "Export produced no trainable screen/image rows; learning_datasets/latest was not updated."
+
             write_json(out_dir / "manifest.json", manifest)
+
             latest = self.out_root / "latest"
-            try:
-                if latest.exists() or latest.is_symlink():
-                    if latest.is_symlink() or latest.is_file():
-                        latest.unlink()
-                    else:
-                        shutil.rmtree(latest)
-                # Windows may require copy instead of symlink.
+            if manifest["trainable"]:
                 try:
-                    latest.symlink_to(out_dir, target_is_directory=True)
+                    if latest.exists() or latest.is_symlink():
+                        if latest.is_symlink() or latest.is_file():
+                            latest.unlink()
+                        else:
+                            shutil.rmtree(latest)
+                    # Windows may require copy instead of symlink.
+                    try:
+                        latest.symlink_to(out_dir, target_is_directory=True)
+                    except Exception:
+                        write_json(self.out_root / "latest_manifest_pointer.json", {"latest": str(out_dir)})
                 except Exception:
-                    write_json(self.out_root / "latest_manifest_pointer.json", {"latest": str(out_dir)})
-            except Exception:
-                pass
-            return {"ok": True, "dataset_dir": str(out_dir), **manifest}
+                    pass
+            else:
+                write_json(self.out_root / "latest_rejected_export.json", {"rejected": str(out_dir), "reason": manifest.get("export_warning")})
+
+            return {"ok": bool(manifest["trainable"]), "dataset_dir": str(out_dir), **manifest}
         finally:
             self.include_raw = include_raw_old
 
@@ -283,6 +298,11 @@ class LearningDatasetWriter:
             if max_records and emitted >= max_records:
                 return
         for ep in self._episodes_from_channel_surf(artifacts.get("channel_surf", []), out_dir, offset=emitted):
+            yield ep
+            emitted += 1
+            if max_records and emitted >= max_records:
+                return
+        for ep in self._episodes_from_state_images(out_dir, offset=emitted):
             yield ep
             emitted += 1
             if max_records and emitted >= max_records:
@@ -339,6 +359,10 @@ class LearningDatasetWriter:
                     out_dir,
                     prefix=f"nav_{i:06d}_after",
                 )
+                if not before_img:
+                    before_img = self._copy_state_image(before_id, out_dir, prefix=f"nav_{i:06d}_before_state")
+                if not after_img:
+                    after_img = self._copy_state_image(after_id, out_dir, prefix=f"nav_{i:06d}_after_state")
                 text_blob = " ".join(str(x or "") for x in [
                     rec.get("ocr_text"), rec.get("before_ocr"), rec.get("after_ocr"), before_node.get("ocr_text"), after_node.get("ocr_text"),
                     before_node.get("label"), after_node.get("label"), rec.get("label")
@@ -409,8 +433,8 @@ class LearningDatasetWriter:
                         after_state_id=after_id,
                         action=action,
                         action_sequence=[action],
-                        before_image=self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image")), out_dir, f"teach_{local_step:06d}_before"),
-                        after_image=self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image")), out_dir, f"teach_{local_step:06d}_after"),
+                        before_image=(self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image")), out_dir, f"teach_{local_step:06d}_before") or self._copy_state_image(before_id, out_dir, f"teach_{local_step:06d}_before_state")),
+                        after_image=(self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image")), out_dir, f"teach_{local_step:06d}_after") or self._copy_state_image(after_id, out_dir, f"teach_{local_step:06d}_after_state")),
                         before_label=str(rec.get("before_label") or ""),
                         after_label=str(rec.get("after_label") or ""),
                         ocr_text=str(first_present(rec.get("ocr_text"), rec.get("after_ocr"))),
@@ -463,6 +487,200 @@ class LearningDatasetWriter:
                     raw=obs if self.include_raw else {},
                 )
 
+
+    def _state_image_roots(self) -> List[Path]:
+        roots: List[Path] = []
+        seen: set[str] = set()
+        for base in (
+            self.crawler_dir / "states",
+            self.root_dir / "crawler_data" / "states",
+            self.root_dir / "states",
+        ):
+            try:
+                resolved = base.resolve()
+            except Exception:
+                resolved = base
+            key = str(resolved)
+            if base.exists() and key not in seen:
+                roots.append(resolved)
+                seen.add(key)
+        return roots
+
+    @staticmethod
+    def _state_lookup_keys_from_stem(stem: str) -> List[str]:
+        """Return lookup keys for crawler screenshot filename stems."""
+        raw = str(stem or "").strip()
+        if not raw:
+            return []
+
+        keys = {raw, slug(raw, 140)}
+
+        # Strip timestamp suffix: stateid_YYYYMMDD_HHMMSS_microseconds.
+        m = re.match(r"^(?P<sid>.+?)_\d{8}_\d{6}(?:_\d+)?$", raw)
+        if m:
+            sid = m.group("sid")
+            keys.add(sid)
+            keys.add(slug(sid, 140))
+
+        # Also index progressive prefixes.
+        parts = raw.split("_")
+        for n in range(2, min(len(parts), 8) + 1):
+            prefix = "_".join(parts[:n])
+            if len(prefix) >= 8:
+                keys.add(prefix)
+                keys.add(slug(prefix, 140))
+
+        return [k for k in keys if k]
+
+    def _build_state_image_index(self) -> Dict[str, List[Path]]:
+        """Scan live crawler screenshots once and build fast lookup indexes."""
+        cached = getattr(self, "_state_image_index", None)
+        cached_files = getattr(self, "_state_image_files_cache", None)
+        if isinstance(cached, dict) and isinstance(cached_files, list):
+            return cached
+
+        idx: Dict[str, List[Path]] = {}
+        files: List[Path] = []
+        seen: set[str] = set()
+
+        for root in self._state_image_roots():
+            try:
+                candidates = [
+                    x for x in root.rglob("*")
+                    if x.is_file() and x.suffix.lower() in IMAGE_EXTS
+                ]
+            except Exception:
+                candidates = []
+
+            for fp in candidates:
+                try:
+                    file_key = str(fp.resolve())
+                except Exception:
+                    file_key = str(fp)
+                if file_key in seen:
+                    continue
+                seen.add(file_key)
+                files.append(fp)
+
+                for lookup in self._state_lookup_keys_from_stem(fp.stem):
+                    idx.setdefault(lookup, []).append(fp)
+
+        def mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except Exception:
+                return 0.0
+
+        files.sort(key=mtime, reverse=True)
+        for key in list(idx.keys()):
+            idx[key].sort(key=mtime, reverse=True)
+
+        self._state_image_index = idx
+        self._state_image_files_cache = files
+        self._state_image_index_stats = {
+            "roots": [str(x) for x in self._state_image_roots()],
+            "files": len(files),
+            "keys": len(idx),
+        }
+        return idx
+
+    def _state_image_candidates(self, state_id: Any) -> List[Path]:
+        sid = str(state_id or "").strip()
+        if not sid:
+            return []
+
+        m = re.search(r"/api/crawl/state/([^/]+)/image", sid)
+        if m:
+            sid = m.group(1)
+
+        index = self._build_state_image_index()
+        keys = [sid, slug(sid, 140)]
+
+        out: List[Path] = []
+        seen: set[str] = set()
+
+        def add_many(items: List[Path]) -> None:
+            for path in items:
+                try:
+                    k = str(path.resolve())
+                except Exception:
+                    k = str(path)
+                if k not in seen:
+                    out.append(path)
+                    seen.add(k)
+
+        for key in keys:
+            add_many(index.get(key, []))
+
+        # Fast in-memory fuzzy fallback. No filesystem globbing.
+        if not out and sid:
+            sid_slug = slug(sid, 140)
+            for key, paths in index.items():
+                if sid in key or sid_slug in key or key in sid or key in sid_slug:
+                    add_many(paths)
+                    if len(out) >= 8:
+                        break
+
+        return out
+
+    def _copy_state_image(self, state_id: Any, out_dir: Path, prefix: str) -> str:
+        for cand in self._state_image_candidates(state_id):
+            rel = self._copy_image(str(cand), out_dir, prefix)
+            if rel:
+                return rel
+        return ""
+
+    def _episodes_from_state_images(self, out_dir: Path, offset: int = 0) -> Iterator[LearningEpisode]:
+        """Harvest live crawler screenshots as screen-perception examples.
+
+        Uses the one-time state image index instead of repeatedly walking
+        crawler_data/states.
+        """
+        self._build_state_image_index()
+        files: List[Path] = list(getattr(self, "_state_image_files_cache", []) or [])
+
+        def mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except Exception:
+                return 0.0
+
+        files.sort(key=mtime)
+
+        seen: set[str] = set()
+        step = 0
+
+        for fp in files:
+            try:
+                key = str(fp.resolve())
+            except Exception:
+                key = str(fp)
+
+            if key in seen:
+                continue
+            seen.add(key)
+
+            state_id = fp.stem
+            rel = self._copy_image(str(fp), out_dir, f"state_{step:06d}_{slug(state_id, 60)}")
+            if not rel:
+                continue
+
+            yield LearningEpisode(
+                episode_id=f"state_image_{step:06d}_{slug(state_id, 40)}",
+                source="state_image",
+                step_index=offset + step,
+                task="screen_perception",
+                goal="understand the current STB/TV screen",
+                after_state_id=state_id,
+                after_image=rel,
+                after_label=state_id,
+                confidence=0.45,
+                changed=False,
+                success_label=True,
+                quality_flags=["state_image_harvest", "indexed_state_image_export"],
+            )
+            step += 1
+
     def _write_sft(self, out_dir: Path, episodes: List[LearningEpisode]) -> Dict[str, int]:
         screen_rows: List[Dict[str, Any]] = []
         policy_rows: List[Dict[str, Any]] = []
@@ -474,7 +692,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:screen",
                     "image": screen_img,
                     "messages": [
-                        {"role": "user", "content": "Analyze this DISH/STB screen. Return compact JSON with screen_type, focused_element, selectable_options, risk_flags, and confidence."},
+                        {"role": "user", "content": "<image>\nAnalyze this DISH/STB screen. Return compact JSON with screen_type, focused_element, selectable_options, risk_flags, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._screen_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })
@@ -483,7 +701,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:policy",
                     "image": ep.before_image,
                     "messages": [
-                        {"role": "user", "content": f"Goal: {ep.goal or 'explore the TV UI safely'}. Given the current screen, choose the next safe remote action as JSON with action_sequence, expected_result, risk, and confidence."},
+                        {"role": "user", "content": f"<image>\nGoal: {ep.goal or 'explore the TV UI safely'}. Given the current screen, choose the next safe remote action as JSON with action_sequence, expected_result, risk, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._policy_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })
@@ -492,7 +710,7 @@ class LearningDatasetWriter:
                     "id": f"{ep.episode_id}:verify",
                     "images": [ep.before_image, ep.after_image],
                     "messages": [
-                        {"role": "user", "content": f"The remote action was {ep.action_sequence or [ep.action]}. Did the after-screen satisfy the expected transition? Return JSON with success, evidence, correction, and confidence."},
+                        {"role": "user", "content": f"<image>\n<image>\nThe remote action was {ep.action_sequence or [ep.action]}. Did the after-screen satisfy the expected transition? Return JSON with success, evidence, correction, and confidence."},
                         {"role": "assistant", "content": json.dumps(self._verify_completion(ep), ensure_ascii=False, separators=(",", ":"))},
                     ],
                 })
@@ -570,6 +788,9 @@ class LearningDatasetWriter:
         if not value:
             return ""
         text = str(value)
+        m = re.search(r"/api/crawl/state/([^/]+)/image", text)
+        if m:
+            return self._copy_state_image(m.group(1), out_dir, prefix)
         if text.startswith("/api/") or text.startswith("http://") or text.startswith("https://"):
             return ""
         path = Path(text.replace("\\", os.sep))

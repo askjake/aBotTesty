@@ -1,0 +1,839 @@
+[
+  {
+    "ts": "2026-05-28T13:25:04+00:00",
+    "state_id": "teach_burst_after_ba89e9b812",
+    "screenshot": "states/sysdiag_f7b1e51fbb_20260528_072458_536495.jpg",
+    "ocr_text": "d:sh Diagnostics iene ne control, press and release its SATor & button cd ad w - a Diagnostics To pair a DISH remote control, press and release its SATor & button ynostics oe To pair a ey e-Ss\u00a5r- Lalo (=i (-re Tome awa) ee alee | LLL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll \u00a5 -_ Receiver / Roll Nol E L Model Hopper3 Hopper Plus , Tastes) ee ReceiverID | R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID S1969504607-15 S0119279908-27 Software Version QCB1 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version 1117 15UN y Hardware ID Nile de ZJAB , Secure ID | 5C8B7A94 P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cor a) Dew Feeds(1-16) Receiver 1 Status Settings Tools mice) ay Network v7 Da 3 Whole Home 4 ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brel accl ay Good Locate Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Bye] aca Good Locate | Unpair Model Hopper3 mf) 8) 81-1 Receiver ID R1956409151-66 Raha Smart Card ID S1969504607-15 S0119\u00b0 Software Version QCB1 5/22/26 12:17 A Boot Strap Version i) a en NIIP Remote 09151-66 R1971718454-74 04607-15 S0119279908-27 oro ' ; Hardware GR0O1 eUorale Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 sevice Good s Reel N ; + Diagnostics dish_after_logo_crop Diagnostics \u2192 Receiver 1 Receiver 1 66 Status SXcYer- Mle i Model Hopper3 Hopper Plus Remote ae Reoraiver IN R1Q56ANQ151-A46 R107171RA54-7A Receiver : Status a a a Diagnostics To DISH SATor and release button remote its control, a pair press Battery Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CH scroll v 4 to ee Diagnostics \u00b7 focus: Receiver 1 \u00b7 role: settings-item A Model Hopper3 | Hopper Plus ee ee an Remote be i eS Lee hea settings d:sh Diagnostics iene ne ynostics oe To pair a ey e-Ss\u00a5r- Lalo (=i (-re Tome Model Hopper3 mf) 8) 81-1 Receiver ID R195640",
+    "focus": {
+      "found": true,
+      "confidence": 1.0,
+      "bbox": [
+        49,
+        195,
+        282,
+        68
+      ],
+      "bbox_norm": [
+        0.0255,
+        0.1806,
+        0.1469,
+        0.063
+      ],
+      "center_norm": [
+        0.099,
+        0.212
+      ],
+      "corners": [
+        [
+          330,
+          262
+        ],
+        [
+          49,
+          262
+        ],
+        [
+          49,
+          195
+        ],
+        [
+          330,
+          195
+        ]
+      ],
+      "area": 18559.5,
+      "aspect": 4.147,
+      "red_density": 0.2622,
+      "contour_vertices": 4,
+      "focus_text": "Receiver 1",
+      "context_text": "Receiver : Status",
+      "label_text": "Status",
+      "row_text": "SXcYer- Mle i Model Hopper3 Hopper Plus Remote ae Reoraiver IN R1Q56ANQ151-A46 R107171RA54-7A",
+      "header_text": "a a a Diagnostics To DISH SATor and release button remote its control, a pair press",
+      "action_bar_text": "Battery Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CH scroll v 4 to ee",
+      "screen_title": "Diagnostics",
+      "menu_title": "Diagnostics",
+      "page_name": "Diagnostics",
+      "block_title": "",
+      "title_source": "dish_after_logo_crop",
+      "grey_box_bbox": null,
+      "active_tab": "",
+      "focused_item": "Receiver 1",
+      "focused_value": "",
+      "human_label": "Diagnostics \u2192 Receiver 1",
+      "focus_role": "settings-item",
+      "context_confidence": 0.9,
+      "neighbor_text": {
+        "left": "A",
+        "right": "Model Hopper3 | Hopper Plus ee ee an Remote",
+        "above": "be i eS Lee hea",
+        "below": "Status"
+      },
+      "setting_pairs": [],
+      "semantic_tags": [
+        "channel",
+        "diagnostics",
+        "dvr",
+        "settings",
+        "settings_or_controls"
+      ],
+      "risk_flags": [
+        "unpair"
+      ],
+      "quality_flags": [
+        "broadened_to_common",
+        "waiting_for_menu_or_video_to_finish_loading"
+      ],
+      "recovery_text": "Diagnostics Diagnostics Diagnostics a a a Diagnostics To DISH SATor and release button remote its control, a pair press Receiver 1 Status Receiver : Status SXcYer- Mle i Model Hopper3 Hopper Plus Remote ae Reoraiver IN R1Q56ANQ151-A46 R107171RA54-7A A Model Hopper3 | Hopper Plus ee ee an Remote Battery Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CH scroll v 4 to ee",
+      "popup_type": "loading",
+      "pin_required": false,
+      "channel_number": "66",
+      "channel_name": "AM",
+      "nearby_words": [
+        "7a",
+        "a46",
+        "hopper",
+        "hopper3",
+        "in",
+        "mle",
+        "model",
+        "plus",
+        "r107171ra54",
+        "r1q56anq151",
+        "receiver",
+        "remote",
+        "reoraiver",
+        "status",
+        "sxcyer"
+      ],
+      "tokens": [
+        "16",
+        "7a",
+        "a46",
+        "an",
+        "available",
+        "battery",
+        "button",
+        "ch",
+        "control",
+        "diagnostics",
+        "feeds",
+        "hopper",
+        "hopper3",
+        "in",
+        "its",
+        "joey",
+        "locate",
+        "mle",
+        "model",
+        "nqb1",
+        "nrb1",
+        "nsb1",
+        "ntb1",
+        "pair",
+        "plus",
+        "r107171ra54",
+        "r1q56anq151",
+        "receiver",
+        "release",
+        "remote",
+        "reoraiver",
+        "sator",
+        "scroll",
+        "status",
+        "sxcyer",
+        "to",
+        "unpair",
+        "w153",
+        "w209"
+      ],
+      "ui_context": {
+        "screen_title": "Diagnostics",
+        "menu_title": "Diagnostics",
+        "page_name": "Diagnostics",
+        "block_title": "",
+        "title_source": "dish_after_logo_crop",
+        "grey_box_bbox": null,
+        "active_tab": "",
+        "focused_item": "Receiver 1",
+        "focused_value": "",
+        "focus_role": "settings-item",
+        "human_label": "Diagnostics \u2192 Receiver 1",
+        "context_summary": "Diagnostics \u00b7 focus: Receiver 1 \u00b7 role: settings-item",
+        "row_text": "SXcYer- Mle i Model Hopper3 Hopper Plus Remote ae Reoraiver IN R1Q56ANQ151-A46 R107171RA54-7A",
+        "neighbor_text": {
+          "left": "A",
+          "right": "Model Hopper3 | Hopper Plus ee ee an Remote",
+          "above": "be i eS Lee hea",
+          "below": "Status"
+        },
+        "setting_pairs": [],
+        "semantic_tags": [
+          "channel",
+          "diagnostics",
+          "dvr",
+          "settings",
+          "settings_or_controls"
+        ],
+        "risk_flags": [
+          "unpair"
+        ],
+        "quality_flags": [
+          "broadened_to_common",
+          "waiting_for_menu_or_video_to_finish_loading"
+        ],
+        "popup_type": "",
+        "pin_required": false,
+        "channel_number": "",
+        "channel_name": "",
+        "context_confidence": 0.9
+      },
+      "row_guess": 1,
+      "col_guess": 0,
+      "region": "top/nav",
+      "warning": "",
+      "region_first": {
+        "schema": "region_first_perception_v1",
+        "strategy": "region_first_then_broaden",
+        "screen_family": "settings",
+        "confidence": 0.5,
+        "stage": "common",
+        "text": "d:sh Diagnostics iene ne control, press and release its SATor & button cd ad w - a Diagnostics To pair a DISH remote control, press and release its SATor & button ynostics oe To pair a ey e-Ss\u00a5r- Lalo (=i (-re Tome awa) ee alee | LLL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll \u00a5 -_ Receiver / Roll Nol E L Model Hopper3 Hopper Plus , Tastes) ee ReceiverID | R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID S1969504607-15 S0119279908-27 Software Version QCB1 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version 1117 15UN y Hardware ID Nile de ZJAB , Secure ID | 5C8B7A94 P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cor a) Dew Feeds(1-16) Receiver 1 Status Settings Tools mice) ay Network v7 Da 3 Whole Home 4 ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brel accl ay Good Locate Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Bye] aca Good Locate | Unpair Model Hopper3 mf) 8) 81-1 Receiver ID R1956409151-66 Raha Smart Card ID S1969504607-15 S0119\u00b0 Software Version QCB1 5/22/26 12:17 A Boot Strap Version i) a en NIIP Remote 09151-66 R1971718454-74 04607-15 S0119279908-27 oro ' ; Hardware GR0O1 eUorale Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 sevice Good s Reel N ; +",
+        "title": "d:sh Diagnostics iene ne ynostics oe To pair a ey e-Ss\u00a5r- Lalo (=i (-re Tome Model Hopper3 mf) 8) 81-1 Receiver ID R1956409151-66 Raha Smart Card ID S1969504607",
+        "displayed_datetime_text": "",
+        "channel_number": "66",
+        "channel_code": "",
+        "focused_item_hint": "R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID S1969504607-15 S0119279908-27 Software Vers",
+        "expected_regions": [
+          "top_left_title",
+          "grey_panel_header",
+          "center_grid"
+        ],
+        "satisfied_regions": [
+          "top_left_title",
+          "grey_panel_header",
+          "center_grid"
+        ],
+        "missing_expectations": [],
+        "suggested_actions": [
+          "down",
+          "up",
+          "right",
+          "left",
+          "select",
+          "back"
+        ],
+        "avoid_actions": [],
+        "quality_flags": [
+          "broadened_to_common"
+        ],
+        "regions": {
+          "top_left_title": "d:sh Diagnostics iene ne",
+          "top_right_clock": "control, press and release its SATor & button",
+          "top_banner": "cd ad w - a Diagnostics To pair a DISH remote control, press and release its SATor & button",
+          "grey_panel_header": "ynostics oe To pair a ey e-Ss\u00a5r- Lalo (=i (-re Tome",
+          "action_bar": "awa) ee alee | LLL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll \u00a5 -_",
+          "focus_box": "Receiver /",
+          "focus_row": "Roll Nol E L Model Hopper3 Hopper Plus , Tastes) ee ReceiverID | R1956409151-66 R1971718454-74 ee",
+          "center_grid": "L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID S1969504607-15 S0119279908-27 Software Version QCB1 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version 1117 15UN y Hardware ID Nile de ZJAB , Secure ID | 5C8B7A94 P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cor a) Dew Feeds(1-16)",
+          "left_channel_strip": "Receiver 1 Status Settings Tools mice) ay Network v7 Da 3 Whole Home 4",
+          "right_detail_panel": "ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brel accl ay Good Locate Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Bye] aca Good Locate | Unpair",
+          "info_title_area": "Model Hopper3 mf) 8) 81-1 Receiver ID R1956409151-66 Raha Smart Card ID S1969504607-15 S0119\u00b0",
+          "info_channel_area": "Software Version QCB1 5/22/26 12:17 A Boot Strap Version i) a en NIIP",
+          "info_description_area": "Remote 09151-66 R1971718454-74 04607-15 S0119279908-27 oro ' ; Hardware GR0O1 eUorale Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 sevice Good s Reel N ; +"
+        },
+        "visual": {
+          "top_brightness": 24.705,
+          "mid_edge_density": 0.0974,
+          "progress_dot_count": 0,
+          "progress_dots_likely": false,
+          "black_fraction": 0.1382
+        }
+      },
+      "human_cues": {
+        "schema": "human_observer_v1",
+        "screen_kind": "loading_interstitial",
+        "confidence": 0.7,
+        "is_actionable": false,
+        "is_transient": true,
+        "loading_confidence": 0.5,
+        "loading_reasons": [
+          "center_progress_dots"
+        ],
+        "passive_video_confidence": 0.0,
+        "passive_video_reasons": [],
+        "feature_tags": [
+          "settings_or_controls",
+          "screen_family:settings"
+        ],
+        "test_goals": [],
+        "risk_flags": [],
+        "annoyance_flags": [
+          "waiting_for_menu_or_video_to_finish_loading"
+        ],
+        "recommended_actions": [
+          "wait",
+          "down",
+          "up",
+          "right",
+          "left",
+          "select",
+          "back"
+        ],
+        "avoid_actions": [
+          "select",
+          "up",
+          "down",
+          "left",
+          "right"
+        ],
+        "channel_number": "17",
+        "channel_name": "AM",
+        "visible_affordances": {
+          "focus_found": true,
+          "focus_confidence": 1.0,
+          "title_present": true,
+          "focused_item_present": true,
+          "dish_logo_top_left": true,
+          "top_right_thumbnail": false,
+          "fallback_focus": {
+            "found": true,
+            "confidence": 0.6181,
+            "bbox": [
+              49,
+              196,
+              282,
+              66
+            ],
+            "center_norm": [
+              0.099,
+              0.212
+            ],
+            "row_guess": 1,
+            "col_guess": 1,
+            "region": "fallback_red_focus",
+            "density": 0.216,
+            "box_fraction": 0.00898,
+            "tokens": [
+              "visual_focus",
+              "focus_r1c1"
+            ]
+          }
+        },
+        "visual": {
+          "progress_dots": {
+            "confidence": 0.7889,
+            "component_count": 44,
+            "aligned_count": 13,
+            "x_span": 208.0,
+            "y_std": 1.45,
+            "gap_cv": 1.456,
+            "center_y": 0.497
+          },
+          "dish_logo_top_left": true,
+          "top_right_thumbnail": false,
+          "mid_entropy": 3.976,
+          "mid_edge_density": 0.09977
+        },
+        "human_notes": [
+          "Human would wait here instead of learning this as a destination screen."
+        ],
+        "summary": "loading_interstitial \u00b7 Diagnostics \u00b7 focus=Receiver 1 \u00b7 channel=17",
+        "tokens": [
+          "sh",
+          "diagnostics",
+          "iene",
+          "ne",
+          "control",
+          "release",
+          "its",
+          "sator",
+          "button",
+          "cd",
+          "ad",
+          "to",
+          "pair",
+          "remote",
+          "ynostics",
+          "oe",
+          "ey",
+          "e-ss",
+          "r-",
+          "lalo",
+          "-re",
+          "tome",
+          "awa",
+          "ee",
+          "alee",
+          "lll",
+          "lillies",
+          "available",
+          "joey",
+          "w153",
+          "w209",
+          "nqb1",
+          "nrb1",
+          "nsb1",
+          "ntb1",
+          "locate",
+          "unpair",
+          "chto",
+          "scroll",
+          "receiver",
+          "roll",
+          "nol",
+          "model",
+          "hopper3",
+          "hopper",
+          "plus",
+          "tastes",
+          "receiverid",
+          "r1956409151-66",
+          "r1971718454-74",
+          "id",
+          "smart",
+          "card",
+          "s1969504607-15",
+          "s0119279908-27",
+          "software",
+          "version",
+          "qcb1",
+          "p15212",
+          "22",
+          "26",
+          "12",
+          "17",
+          "am",
+          "2026",
+          "09",
+          "boot",
+          "strap",
+          "1117",
+          "15un",
+          "hardware",
+          "nile",
+          "de",
+          "zjab",
+          "secure",
+          "5c8b7a94",
+          "location",
+          "name",
+          "living",
+          "room"
+        ]
+      },
+      "loading": true
+    }
+  },
+  {
+    "ts": "2026-05-28T17:51:32+00:00",
+    "state_id": "sysdiag_1a4b7f78ac",
+    "screenshot": "states/sysdiag_1a4b7f78ac_20260528_115126_302346.jpg",
+    "ocr_text": "roa Diagnostics To pair aL control, press and release its SATor & button od re nat ion a Diagnostics To pair a DISH remote control, press and release its SATor & button ynostics oe To pair - press and release it: awa) ee aati dateteted? j LL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll v -_ Receiver / RCclerl Nols l Model Hopper3 Hopper Plus - Tastes) es ReceiverID | R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID $1969504607-15 S0119279908-27 Software Version Ole) = 3 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version WAS 15UN v Hardware ID Nitsa ZJAB 2 Secure ID | E/B8C8DD P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cer 8) De Feeds(1-16) Receiver / Status Settings Tools mice) ay Network y Da 3 Whole Home 4 ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brclaccl ay Good Locate | Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 ByclaCcl ay Good Locate | Unpair Model Hopper3 me) 8) 81-1 Receiver ID R1956409151-66 Rah ae Smart Card ID S1969504607-15 S0119% Software Version QCB1 5/22/26 12:17 A Boot Strap Version WA iacchanre int NUR ato Pal Olie 09151-66 R1971718454-74 04607-15 S0119279908-27 cae 7 ; Hardware GR0O1 mre Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 Eerie Good I Reel N ; 7 Diagnostics dish_after_logo_crop Diagnostics \u2192 Receiver Receiver 66 Status Receiver | Receiver 1 Model Hopper3 Hopper Plus : Cede nels) ae ay Vot TV T=T ol | R1Q56ANQ151-A6 R107171R2A54-7A Receiver : Status a re Ss Diagnostics To DISH SATor and release button remote its control, a pair press Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CHto scroll v 4 ee Diagnostics \u00b7 focus: Receiver \u00b7 role: settings-item _ Model Hopper3 | Hopper Plus re ee nn Remote Di hb Leen settings roa Diagnostics To pair aL ynostics oe To pair - press and release it: Model Hopper3 me) 8) 81-1",
+    "focus": {
+      "found": true,
+      "confidence": 1.0,
+      "bbox": [
+        49,
+        195,
+        282,
+        68
+      ],
+      "bbox_norm": [
+        0.0255,
+        0.1806,
+        0.1469,
+        0.063
+      ],
+      "center_norm": [
+        0.099,
+        0.212
+      ],
+      "corners": [
+        [
+          330,
+          262
+        ],
+        [
+          49,
+          262
+        ],
+        [
+          49,
+          195
+        ],
+        [
+          330,
+          195
+        ]
+      ],
+      "area": 18559.5,
+      "aspect": 4.147,
+      "red_density": 0.2622,
+      "contour_vertices": 4,
+      "focus_text": "Receiver |",
+      "context_text": "Receiver : Status",
+      "label_text": "Status",
+      "row_text": "Receiver 1 Model Hopper3 Hopper Plus : Cede nels) ae ay Vot TV T=T ol | R1Q56ANQ151-A6 R107171R2A54-7A",
+      "header_text": "a re Ss Diagnostics To DISH SATor and release button remote its control, a pair press",
+      "action_bar_text": "Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CHto scroll v 4 ee",
+      "screen_title": "Diagnostics",
+      "menu_title": "Diagnostics",
+      "page_name": "Diagnostics",
+      "block_title": "",
+      "title_source": "dish_after_logo_crop",
+      "grey_box_bbox": null,
+      "active_tab": "",
+      "focused_item": "Receiver",
+      "focused_value": "",
+      "human_label": "Diagnostics \u2192 Receiver",
+      "focus_role": "settings-item",
+      "context_confidence": 0.9,
+      "neighbor_text": {
+        "left": "_",
+        "right": "Model Hopper3 | Hopper Plus re ee nn Remote",
+        "above": "Di hb Leen",
+        "below": "Status"
+      },
+      "setting_pairs": [],
+      "semantic_tags": [
+        "channel",
+        "diagnostics",
+        "dvr",
+        "settings",
+        "settings_or_controls"
+      ],
+      "risk_flags": [
+        "unpair"
+      ],
+      "quality_flags": [
+        "broadened_to_common"
+      ],
+      "recovery_text": "Diagnostics Diagnostics Diagnostics a re Ss Diagnostics To DISH SATor and release button remote its control, a pair press Receiver | Status Receiver : Status Receiver 1 Model Hopper3 Hopper Plus : Cede nels) ae ay Vot TV T=T ol | R1Q56ANQ151-A6 R107171R2A54-7A _ Model Hopper3 | Hopper Plus re ee nn Remote Feeds(1-16) Available W153 W209 NRB1 NSB1 NTB1 NQB1 Joey Locate Unpair Press CHto scroll v 4 ee",
+      "popup_type": "",
+      "pin_required": false,
+      "channel_number": "66",
+      "channel_name": "AM",
+      "nearby_words": [
+        "7a",
+        "a6",
+        "ay",
+        "cede",
+        "hopper",
+        "hopper3",
+        "model",
+        "nels",
+        "ol",
+        "plus",
+        "r107171r2a54",
+        "r1q56anq151",
+        "receiver",
+        "status",
+        "tv",
+        "vot"
+      ],
+      "tokens": [
+        "16",
+        "7a",
+        "a6",
+        "available",
+        "ay",
+        "button",
+        "cede",
+        "chto",
+        "control",
+        "diagnostics",
+        "feeds",
+        "hopper",
+        "hopper3",
+        "its",
+        "joey",
+        "locate",
+        "model",
+        "nels",
+        "nn",
+        "nqb1",
+        "nrb1",
+        "nsb1",
+        "ntb1",
+        "ol",
+        "pair",
+        "plus",
+        "r107171r2a54",
+        "r1q56anq151",
+        "receiver",
+        "release",
+        "remote",
+        "sator",
+        "scroll",
+        "ss",
+        "status",
+        "to",
+        "tv",
+        "unpair",
+        "vot",
+        "w153",
+        "w209"
+      ],
+      "ui_context": {
+        "screen_title": "Diagnostics",
+        "menu_title": "Diagnostics",
+        "page_name": "Diagnostics",
+        "block_title": "",
+        "title_source": "dish_after_logo_crop",
+        "grey_box_bbox": null,
+        "active_tab": "",
+        "focused_item": "Receiver",
+        "focused_value": "",
+        "focus_role": "settings-item",
+        "human_label": "Diagnostics \u2192 Receiver",
+        "context_summary": "Diagnostics \u00b7 focus: Receiver \u00b7 role: settings-item",
+        "row_text": "Receiver 1 Model Hopper3 Hopper Plus : Cede nels) ae ay Vot TV T=T ol | R1Q56ANQ151-A6 R107171R2A54-7A",
+        "neighbor_text": {
+          "left": "_",
+          "right": "Model Hopper3 | Hopper Plus re ee nn Remote",
+          "above": "Di hb Leen",
+          "below": "Status"
+        },
+        "setting_pairs": [],
+        "semantic_tags": [
+          "channel",
+          "diagnostics",
+          "dvr",
+          "settings",
+          "settings_or_controls"
+        ],
+        "risk_flags": [
+          "unpair"
+        ],
+        "quality_flags": [
+          "broadened_to_common"
+        ],
+        "popup_type": "",
+        "pin_required": false,
+        "channel_number": "",
+        "channel_name": "",
+        "context_confidence": 0.9
+      },
+      "row_guess": 1,
+      "col_guess": 0,
+      "region": "top/nav",
+      "warning": "",
+      "region_first": {
+        "schema": "region_first_perception_v1",
+        "strategy": "region_first_then_broaden",
+        "screen_family": "settings",
+        "confidence": 0.5,
+        "stage": "common",
+        "text": "roa Diagnostics To pair aL control, press and release its SATor & button od re nat ion a Diagnostics To pair a DISH remote control, press and release its SATor & button ynostics oe To pair - press and release it: awa) ee aati dateteted? j LL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll v -_ Receiver / RCclerl Nols l Model Hopper3 Hopper Plus - Tastes) es ReceiverID | R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID $1969504607-15 S0119279908-27 Software Version Ole) = 3 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version WAS 15UN v Hardware ID Nitsa ZJAB 2 Secure ID | E/B8C8DD P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cer 8) De Feeds(1-16) Receiver / Status Settings Tools mice) ay Network y Da 3 Whole Home 4 ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brclaccl ay Good Locate | Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 ByclaCcl ay Good Locate | Unpair Model Hopper3 me) 8) 81-1 Receiver ID R1956409151-66 Rah ae Smart Card ID S1969504607-15 S0119% Software Version QCB1 5/22/26 12:17 A Boot Strap Version WA iacchanre int NUR ato Pal Olie 09151-66 R1971718454-74 04607-15 S0119279908-27 cae 7 ; Hardware GR0O1 mre Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 Eerie Good I Reel N ; 7",
+        "title": "roa Diagnostics To pair aL ynostics oe To pair - press and release it: Model Hopper3 me) 8) 81-1 Receiver ID R1956409151-66 Rah ae Smart Card ID S1969504607-15 ",
+        "displayed_datetime_text": "",
+        "channel_number": "66",
+        "channel_code": "",
+        "focused_item_hint": "R1956409151-66 R1971718454-74 ee L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID $1969504607-15 S0119279908-27 Software Vers",
+        "expected_regions": [
+          "top_left_title",
+          "grey_panel_header",
+          "center_grid"
+        ],
+        "satisfied_regions": [
+          "top_left_title",
+          "grey_panel_header",
+          "center_grid"
+        ],
+        "missing_expectations": [],
+        "suggested_actions": [
+          "down",
+          "up",
+          "right",
+          "left",
+          "select",
+          "back"
+        ],
+        "avoid_actions": [],
+        "quality_flags": [
+          "broadened_to_common"
+        ],
+        "regions": {
+          "top_left_title": "roa Diagnostics To pair aL",
+          "top_right_clock": "control, press and release its SATor & button",
+          "top_banner": "od re nat ion a Diagnostics To pair a DISH remote control, press and release its SATor & button",
+          "grey_panel_header": "ynostics oe To pair - press and release it:",
+          "action_bar": "awa) ee aati dateteted? j LL) lillies Available Joey W153 W209 NQB1 NRB1 NSB1 NTB1 Locate Unpair 4 Press CHto scroll v -_",
+          "focus_box": "Receiver /",
+          "focus_row": "RCclerl Nols l Model Hopper3 Hopper Plus - Tastes) es ReceiverID | R1956409151-66 R1971718454-74 ee",
+          "center_grid": "L Model Hopper3 Hopper Plus Receiver ID R1956409151-66 R1971718454-74 Smart Card ID $1969504607-15 S0119279908-27 Software Version Ole) = 3 P15212 5/22/26 12:17 AM | 4/3/2026, 4:09 Boot Strap Version WAS 15UN v Hardware ID Nitsa ZJAB 2 Secure ID | E/B8C8DD P Location Name Living Room 1 DNASP DNASP563 DshT84 | S71 Cer 8) De Feeds(1-16)",
+          "left_channel_strip": "Receiver / Status Settings Tools mice) ay Network y Da 3 Whole Home 4",
+          "right_detail_panel": "ress and release its SATor & button Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 Brclaccl ay Good Locate | Unpair Remote Model 60.0 Hardware GRO1 Firmware E001TOO2ER04 ByclaCcl ay Good Locate | Unpair",
+          "info_title_area": "Model Hopper3 me) 8) 81-1 Receiver ID R1956409151-66 Rah ae Smart Card ID S1969504607-15 S0119%",
+          "info_channel_area": "Software Version QCB1 5/22/26 12:17 A Boot Strap Version WA iacchanre int NUR",
+          "info_description_area": "ato Pal Olie 09151-66 R1971718454-74 04607-15 S0119279908-27 cae 7 ; Hardware GR0O1 mre Firmware E001TOO2ER04 > 12:17 AM 4/3/2026, 4:09 Eerie Good I Reel N ; 7"
+        },
+        "visual": {
+          "top_brightness": 24.697,
+          "mid_edge_density": 0.09726,
+          "progress_dot_count": 0,
+          "progress_dots_likely": false,
+          "black_fraction": 0.1382
+        }
+      },
+      "human_cues": {
+        "schema": "human_observer_v1",
+        "screen_kind": "actionable_ui",
+        "confidence": 0.74,
+        "is_actionable": true,
+        "is_transient": false,
+        "loading_confidence": 0.0,
+        "loading_reasons": [],
+        "passive_video_confidence": 0.0,
+        "passive_video_reasons": [],
+        "feature_tags": [
+          "settings_or_controls",
+          "screen_family:settings"
+        ],
+        "test_goals": [],
+        "risk_flags": [],
+        "annoyance_flags": [],
+        "recommended_actions": [
+          "read_focus",
+          "up",
+          "down",
+          "left",
+          "right",
+          "select",
+          "back"
+        ],
+        "avoid_actions": [],
+        "channel_number": "17",
+        "channel_name": "AM",
+        "visible_affordances": {
+          "focus_found": true,
+          "focus_confidence": 1.0,
+          "title_present": true,
+          "focused_item_present": true,
+          "dish_logo_top_left": true,
+          "top_right_thumbnail": false,
+          "fallback_focus": {
+            "found": true,
+            "confidence": 0.6186,
+            "bbox": [
+              49,
+              196,
+              282,
+              67
+            ],
+            "center_norm": [
+              0.099,
+              0.2125
+            ],
+            "row_guess": 1,
+            "col_guess": 1,
+            "region": "fallback_red_focus",
+            "density": 0.213,
+            "box_fraction": 0.00911,
+            "tokens": [
+              "visual_focus",
+              "focus_r1c1"
+            ]
+          }
+        },
+        "visual": {
+          "progress_dots": {
+            "confidence": 0.0,
+            "component_count": 42,
+            "aligned_count": 20,
+            "rejected": "too_many_components_for_progress_dots"
+          },
+          "dish_logo_top_left": true,
+          "top_right_thumbnail": false,
+          "mid_entropy": 3.975,
+          "mid_edge_density": 0.10158
+        },
+        "human_notes": [],
+        "summary": "actionable_ui \u00b7 Diagnostics \u00b7 focus=Receiver \u00b7 channel=17",
+        "tokens": [
+          "roa",
+          "diagnostics",
+          "to",
+          "pair",
+          "al",
+          "control",
+          "release",
+          "its",
+          "sator",
+          "button",
+          "od",
+          "re",
+          "nat",
+          "ion",
+          "remote",
+          "ynostics",
+          "oe",
+          "it",
+          "awa",
+          "ee",
+          "aati",
+          "dateteted",
+          "ll",
+          "lillies",
+          "available",
+          "joey",
+          "w153",
+          "w209",
+          "nqb1",
+          "nrb1",
+          "nsb1",
+          "ntb1",
+          "locate",
+          "unpair",
+          "chto",
+          "scroll",
+          "receiver",
+          "rcclerl",
+          "nols",
+          "model",
+          "hopper3",
+          "hopper",
+          "plus",
+          "tastes",
+          "es",
+          "receiverid",
+          "r1956409151-66",
+          "r1971718454-74",
+          "id",
+          "smart",
+          "card",
+          "$1969504607-15",
+          "s0119279908-27",
+          "software",
+          "version",
+          "ole",
+          "p15212",
+          "22",
+          "26",
+          "12",
+          "17",
+          "am",
+          "2026",
+          "09",
+          "boot",
+          "strap",
+          "was",
+          "15un",
+          "hardware",
+          "nitsa",
+          "zjab",
+          "secure",
+          "b8c8dd",
+          "location",
+          "name",
+          "living",
+          "room",
+          "dnasp",
+          "dnasp563",
+          "dsht84"
+        ]
+      }
+    }
+  }
+]

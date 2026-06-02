@@ -76,3 +76,19 @@ temp/
 *.tar.gz
 *.zip
 *.bundle
+*.jpg
+*.jpg
+crawler_data/
+.venv/
+
+# Large ML model binary files (use Git LFS or external storage instead)
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.pkl
+*.onnx
+models/vlm_adapters/
+models/vlm_jobs/
+learning_datasets/
