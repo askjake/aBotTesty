@@ -80,3 +80,4 @@ temp/
 *.jpg
 *.json
 crawler_data/
+.venv/
