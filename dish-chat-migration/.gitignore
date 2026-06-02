@@ -1,0 +1,44 @@
+# Dish-Chat Migration - Git Ignore
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# API keys and credentials
+*.key
+credentials
+.aws/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+*.tar.gz
+*.zip
+build/
+

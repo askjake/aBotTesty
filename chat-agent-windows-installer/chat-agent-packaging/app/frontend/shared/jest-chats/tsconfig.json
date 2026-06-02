@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "node",
+    "target": "es2020",
+    "lib": ["dom", "dom.iterable", "es2020"],
+    "baseUrl": ".",
+    "paths": {
+      "@chats/*": ["../../apps/chats/src/*"],
+      "@/*": ["../../apps/chats/src/*"],
+      "@shared/jest-config/*": ["../jest-config/*"],
+      "@shared/ui/*": ["../ui/src/*"],
+      "@shared/*": ["../$1/src/*"]
+    }
+  },
+  "include": [
+    "__tests__/**/*",
+    "tests/**/*",
+    "../jest-config/**/*",
+    "../../apps/chats/src/**/*"
+  ]
+}

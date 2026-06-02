@@ -1,0 +1,19 @@
+from functools import cache
+import boto3.session
+from app.config import get_settings
+
+settings = get_settings()
+
+session = boto3.session.Session(region_name=settings.AWS_REGION)
+
+@cache
+def get_s3_client():
+    client_kwargs = {}
+    
+    # Support for local S3-compatible storage (MinIO, LocalStack)
+    if settings.AWS_ENDPOINT_URL:
+        client_kwargs['endpoint_url'] = settings.AWS_ENDPOINT_URL
+        # For local development, allow path-style access
+        client_kwargs['config'] = boto3.session.Config(s3={'addressing_style': 'path'})
+    
+    return session.client("s3", **client_kwargs)

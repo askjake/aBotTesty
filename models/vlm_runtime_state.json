@@ -1,0 +1,30 @@
+{
+  "enabled": false,
+  "mode": "shadow",
+  "server_url": "http://10.79.85.35:8765",
+  "active_run": "abot_vlm_20260601_154726",
+  "active_adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260601_154726/outputs/abot_vlm_20260601_154726",
+  "base_model": "Qwen/Qwen3-VL-8B-Instruct",
+  "min_confidence": 0.65,
+  "max_risk": 0.35,
+  "allow_select": false,
+  "timeout_s": 30.0,
+  "last_update": "2026-06-02T08:43:41-0600",
+  "last_health": {
+    "ok": false,
+    "error": "HTTPConnectionPool(host='10.79.85.35', port=8765): Max retries exceeded with url: /health (Caused by NewConnectionError(\"HTTPConnection(host='10.79.85.35', port=8765): Failed to establish a new connection: [Errno 111] Connection refused\"))",
+    "server_url": "http://10.79.85.35:8765"
+  },
+  "last_policy": {},
+  "stats": {
+    "calls": 0,
+    "accepted": 0,
+    "rejected": 0,
+    "errors": 0,
+    "shadow_logged": 0,
+    "assist_reordered": 0,
+    "autonomous_chosen": 0,
+    "last_error": "",
+    "last_latency_s": 0.0
+  }
+}

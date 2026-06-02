@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dishchat-postgres
+    environment:
+      POSTGRES_DB: dishchat
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev123
+    ports:
+      - "5434:5432"
+    volumes:
+      - dishchat_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev_user -d dishchat"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  dishchat_pgdata:
+    name: dishchat_pgdata
