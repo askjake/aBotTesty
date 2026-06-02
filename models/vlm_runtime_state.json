@@ -9,12 +9,12 @@
   "max_risk": 0.35,
   "allow_select": true,
   "timeout_s": 30.0,
-  "last_update": "2026-06-02T07:34:40-0600",
+  "last_update": "2026-06-02T07:55:17-0600",
   "last_health": {
     "ok": true,
     "base_model": "Qwen/Qwen3-VL-8B-Instruct",
     "adapter_path": "/home/montjac/aBotTesty_vlm_jobs/abot_vlm_20260601_154726/outputs/abot_vlm_20260601_154726",
-    "uptime_s": 662.8,
+    "uptime_s": 1925.9,
     "cuda_available": true,
     "gpu_count": 1,
     "http_status": 200,
@@ -24,21 +24,21 @@
     "ok": true,
     "enabled": true,
     "mode": "assist",
-    "accepted": true,
-    "suggested_action": "left",
+    "accepted": false,
+    "suggested_action": "",
     "action_sequence": [
       "left"
     ],
-    "reason": "accepted",
-    "confidence": 0.7238,
+    "reason": "confidence_below_threshold:0.487",
+    "confidence": 0.4868,
     "risk": "safe",
     "raw": {
       "action_sequence": [
         "left"
       ],
-      "expected_result": "arrive at or focus VEN",
+      "expected_result": "arrive at or focus 1:20PM Cure gg → a ail",
       "risk": "safe",
-      "confidence": 0.7238
+      "confidence": 0.4868
     },
     "allowed_actions": [
       "up",
@@ -59,7 +59,7 @@
     ],
     "raw_suggested_action": "left",
     "risk_score": 0.0,
-    "latency_s": 4.35,
+    "latency_s": 4.623,
     "health_hint": {
       "ok": true,
       "base_model": "Qwen/Qwen3-VL-8B-Instruct",
@@ -74,12 +74,12 @@
   "stats": {
     "calls": 0,
     "accepted": 35,
-    "rejected": 6,
+    "rejected": 7,
     "errors": 0,
     "shadow_logged": 15,
     "assist_reordered": 16,
     "autonomous_chosen": 3,
     "last_error": "",
-    "last_latency_s": 4.35
+    "last_latency_s": 4.623
   }
 }

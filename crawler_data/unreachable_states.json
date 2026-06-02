@@ -1,6 +1,6 @@
 {
   "schema": "persistence_tracker_v2",
-  "updated_at": "2026-06-02T13:38:22+00:00",
+  "updated_at": "2026-06-02T13:39:40+00:00",
   "unreachable_states": {
     "after_complete_204eeb8d07": {
       "state_id": "after_complete_204eeb8d07",
@@ -119,7 +119,7 @@
     "operator_before_20260527_085535_684109": {
       "state_id": "operator_before_20260527_085535_684109",
       "first_attempt": "2026-05-27T18:24:29+00:00",
-      "last_attempt": "2026-06-02T13:20:46+00:00",
+      "last_attempt": "2026-06-02T13:38:57+00:00",
       "failed_routes": [
         [],
         [],
@@ -134,7 +134,7 @@
         [],
         []
       ],
-      "attempts": 86,
+      "attempts": 87,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -1662,7 +1662,7 @@
     "teach_burst_after_0550ea6aeb": {
       "state_id": "teach_burst_after_0550ea6aeb",
       "first_attempt": "2026-05-27T19:39:01+00:00",
-      "last_attempt": "2026-06-02T13:21:48+00:00",
+      "last_attempt": "2026-06-02T13:38:39+00:00",
       "failed_routes": [
         [],
         [],
@@ -1677,7 +1677,7 @@
         [],
         []
       ],
-      "attempts": 79,
+      "attempts": 80,
       "priority": 0.57,
       "reason": "unable_to_restore_frontier_state",
       "last_error": null,
@@ -78461,24 +78461,6 @@
         "depth": 18
       }
     },
-    "teach_burst_after_a8a8c131d0": {
-      "state_id": "teach_burst_after_a8a8c131d0",
-      "first_attempt": "2026-06-01T21:55:52+00:00",
-      "last_attempt": "2026-06-02T13:23:55+00:00",
-      "failed_routes": [
-        [],
-        []
-      ],
-      "attempts": 2,
-      "priority": 0.92,
-      "reason": "unable_to_restore_frontier_state",
-      "last_error": null,
-      "context": {
-        "label": "Settings \u2192 rH aad",
-        "pattern": "linear_menu",
-        "depth": 18
-      }
-    },
     "teach_burst_after_721e6cee78": {
       "state_id": "teach_burst_after_721e6cee78",
       "first_attempt": "2026-06-01T21:57:09+00:00",
@@ -105686,10 +105668,10 @@
     }
   },
   "stats": {
-    "total_unreachable": 5603,
-    "total_failures_tracked": 19478,
+    "total_unreachable": 5602,
+    "total_failures_tracked": 19480,
     "total_retries_attempted": 0,
-    "successful_retries": 38,
+    "successful_retries": 39,
     "top_unreachable": [
       {
         "state_id": "operator_after_20260527_125440_478625",
