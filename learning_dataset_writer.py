@@ -407,19 +407,49 @@ class LearningDatasetWriter:
             events = as_list(data.get("events"))
             pending: Optional[Dict[str, Any]] = None
             local_step = 0
+
+            # Pre-pass: harvest screenshot paths embedded in session_start_state
+            # events (they carry the full state object with a .screenshot field)
+            # and register them into the existing _copy_state_image index.
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("type") == "session_start_state":
+                    state_obj = ev.get("state") or {}
+                    if isinstance(state_obj, dict):
+                        sid = str(state_obj.get("state_id") or "")
+                        ss  = str(state_obj.get("screenshot") or "")
+                        if sid and ss:
+                            # Prime the _build_state_image_index cache so
+                            # _copy_state_image can resolve this state_id.
+                            idx = self._build_state_image_index()
+                            if sid not in idx:
+                                # Resolve to an absolute Path and insert.
+                                p = Path(ss)
+                                candidates = [
+                                    self.crawler_dir / p,
+                                    self.root_dir / p,
+                                    self.crawler_dir / p.name,
+                                ]
+                                for c in candidates:
+                                    if c.is_file():
+                                        idx.setdefault(sid, []).append(c)
+                                        break
+
             for ev in events:
                 if not isinstance(ev, dict):
                     continue
                 typ = str(ev.get("type") or "")
                 if typ in {"button_sent_pending", "button", "button_sent"}:
                     pending = ev
-                if typ in {"transition", "button_result", "transition_recorded"} or (pending and ev.get("after_state")):
+                # Accept both legacy event names and the current "button_transition" name.
+                if typ in {"transition", "button_result", "transition_recorded", "button_transition"} or (pending and ev.get("after_state")):
                     rec = {**(pending or {}), **ev}
                     action = normalize_action(first_present(rec.get("button"), rec.get("key"), rec.get("action")))
                     if not action:
                         continue
                     before_id = str(first_present(rec.get("before_state"), rec.get("from_state")))
-                    after_id = str(first_present(rec.get("after_state"), rec.get("to_state")))
+                    after_id  = str(first_present(rec.get("after_state"),  rec.get("to_state")))
                     text_blob = " ".join(str(rec.get(k) or "") for k in ("before_label", "after_label", "ocr_text", "focus_text", "note"))
                     risk_flags = []
                     if RISK_TEXT_RX.search(text_blob):
@@ -433,8 +463,15 @@ class LearningDatasetWriter:
                         after_state_id=after_id,
                         action=action,
                         action_sequence=[action],
-                        before_image=(self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image")), out_dir, f"teach_{local_step:06d}_before") or self._copy_state_image(before_id, out_dir, f"teach_{local_step:06d}_before_state")),
-                        after_image=(self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image")), out_dir, f"teach_{local_step:06d}_after") or self._copy_state_image(after_id, out_dir, f"teach_{local_step:06d}_after_state")),
+                        # Explicit screenshot on event > _copy_state_image by state_id.
+                        before_image=(
+                            self._copy_image(first_present(rec.get("before_screenshot"), rec.get("before_image")), out_dir, f"teach_{local_step:06d}_before")
+                            or self._copy_state_image(before_id, out_dir, f"teach_{local_step:06d}_before_state")
+                        ),
+                        after_image=(
+                            self._copy_image(first_present(rec.get("after_screenshot"), rec.get("after_image")), out_dir, f"teach_{local_step:06d}_after")
+                            or self._copy_state_image(after_id, out_dir, f"teach_{local_step:06d}_after_state")
+                        ),
                         before_label=str(rec.get("before_label") or ""),
                         after_label=str(rec.get("after_label") or ""),
                         ocr_text=str(first_present(rec.get("ocr_text"), rec.get("after_ocr"))),
