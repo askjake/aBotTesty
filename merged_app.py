@@ -42,6 +42,11 @@ from focus_detector import detect_focus, draw_focus_overlay  # noqa: E402
 from parental_control_agent import ParentalControlAgent  # noqa: E402
 from manual_teaching_recorder import ManualTeachingRecorder  # noqa: E402
 from dashboard_analytics import DashboardDataset  # noqa: E402
+try:
+    from popup_monitor import PopupMonitor as _PopupMonitor
+except Exception as _popup_import_exc:
+    _PopupMonitor = None
+    log.warning("popup_monitor module not found: %s", _popup_import_exc)
 from channel_surf_agent import ChannelSurfAgent  # noqa: E402
 from channel_metadata import extract_guide_grid  # noqa: E402
 from ppv_purchase_agent import PPVPurchaseAgent  # noqa: E402
@@ -502,6 +507,26 @@ channel_surf = ChannelSurfAgent(
     send_key=crawler_send_key,
     default_delay_s=float(CFG.get("crawler_channel_digit_gap_s", 0.075)),
 )
+# ---- popup monitor v38.14 ----
+popup_monitor = None
+if _PopupMonitor is not None:
+    try:
+        popup_monitor = _PopupMonitor(
+            capture_frame=monitor.get_frame,
+            root_dir=ROOT,
+            interval_s=float(CFG.get("popup_monitor_interval_s", 1.0)),
+            min_confidence=float(CFG.get("popup_monitor_min_confidence", 0.48)),
+            min_repeat=int(CFG.get("popup_monitor_min_repeat", 2)),
+            cooldown_s=float(CFG.get("popup_monitor_cooldown_s", 20.0)),
+        )
+        if bool(CFG.get("popup_monitor_auto_start", True)):
+            popup_monitor.start()
+            log.info("popup monitor started")
+    except Exception:
+        log.exception("popup monitor initialization failed")
+        popup_monitor = None
+# ---- end popup monitor init ----
+
 
 ppv_agent = PPVPurchaseAgent(
     data_dir=CRAWLER_DIR,
@@ -1776,6 +1801,43 @@ def api_learning_remote_async_jobs():
         return jsonify(ok=True, jobs=list(_VLM_ASYNC_JOBS.values()))
 
 
+
+
+@app.route("/api/learning/dataset/overview", methods=["GET"])
+def api_learning_dataset_overview():
+    """Lightweight dataset overview consumed by the learning dashboard KPI cards.
+
+    Returns the same shape as /api/learning/training/overview but skips
+    the slow remote SSH call — safe to poll every 3-5 seconds.
+    """
+    try:
+        from vlm_training_monitor import latest_dataset, live_source_summary, local_dataset_timeline
+        ld = latest_dataset(ROOT)
+        live = live_source_summary(ROOT, CRAWLER_DIR)
+        timeline = local_dataset_timeline(ROOT, limit=20)
+        return jsonify(
+            ok=True,
+            latest_dataset=ld,
+            live_source=live,
+            dataset_timeline=timeline,
+            summary=dict(
+                readiness_score=ld.get("readiness_score", 0),
+                total_sft_rows=ld.get("total_sft_rows", 0),
+                image_count=ld.get("image_count", 0),
+                episode_count=ld.get("episode_count", 0),
+                trainable=ld.get("trainable", False) or ld.get("train_ready_smoke", False),
+                dataset_name=ld.get("name", ""),
+                selection_source=ld.get("selection_source", ""),
+                state_image_files=live.get("state_image_files", 0),
+                teacher_events=live.get("teacher_events", 0),
+                nav_nodes=live.get("nav_nodes", 0),
+                nav_edges=live.get("nav_edges", 0),
+            ),
+        )
+    except Exception as exc:
+        log.exception("dataset overview failed")
+        return jsonify(ok=False, error=str(exc)), 500
+
 @app.route("/api/learning/stats", methods=["GET"])
 def api_learning_stats():
     try:
@@ -2593,15 +2655,30 @@ def api_crawl_transitions():
 
 @app.route("/api/crawl/state/<state_id>/image")
 def api_crawl_state_image(state_id: str):
+    # Primary: live crawler graph node (fastest, most authoritative)
     node = crawler.graph.nodes.get(state_id)
-    if not node or not node.representative.screenshot:
-        abort(404)
-    path = (CRAWLER_DIR / node.representative.screenshot).resolve()
-    if CRAWLER_DIR not in path.parents and path != CRAWLER_DIR:
-        abort(404)
-    if not path.is_file():
-        abort(404)
-    return send_file(path, mimetype="image/jpeg")
+    if node and getattr(node.representative, "screenshot", None):
+        path = (CRAWLER_DIR / node.representative.screenshot).resolve()
+        if CRAWLER_DIR in path.parents and path.is_file():
+            return send_file(path, mimetype="image/jpeg")
+
+    # Fallback: scan crawler_data/states/ for any file matching this state_id.
+    # This resolves teacher-session state_ids (operator_after_*, teach_burst_*, etc.)
+    # that aren't in the nav-graph but do have screenshots on disk.
+    try:
+        from learning_dataset_writer import LearningDatasetWriter as _LDW
+        _w = _LDW(root_dir=ROOT, crawler_dir=CRAWLER_DIR, out_dir=ROOT / "learning_datasets")
+        candidates = _w._state_image_candidates(state_id)
+        if candidates:
+            path = candidates[0].resolve()
+            safe_roots = [CRAWLER_DIR.resolve(), ROOT.resolve()]
+            if any(str(path).startswith(str(r)) for r in safe_roots) and path.is_file():
+                mime = "image/jpeg" if path.suffix.lower() in {".jpg", ".jpeg"} else "image/png"
+                return send_file(path, mimetype=mime)
+    except Exception:
+        pass
+
+    abort(404)
 
 
 @app.route("/api/crawl/candidates", methods=["GET", "POST"])
@@ -2854,6 +2931,63 @@ def api_dashboards_superset_zip():
     return send_file(io.BytesIO(blob), mimetype="application/zip", as_attachment=True, download_name="stb_learning_superset_dashboards.zip")
 
 
+
+
+# ═══════════════════════════════════════════════════════════
+# Popup Monitor API routes (v38.14)
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/api/popup_monitor/status")
+def api_popup_monitor_status():
+    if popup_monitor is None:
+        return jsonify(ok=False, running=False, error="popup monitor unavailable (module missing or init failed)"), 200
+    return jsonify(popup_monitor.status())
+
+
+@app.route("/api/popup_monitor/start", methods=["POST", "GET"])
+def api_popup_monitor_start():
+    if popup_monitor is None:
+        return jsonify(ok=False, error="popup monitor unavailable"), 503
+    return jsonify(popup_monitor.start())
+
+
+@app.route("/api/popup_monitor/stop", methods=["POST", "GET"])
+def api_popup_monitor_stop():
+    if popup_monitor is None:
+        return jsonify(ok=False, error="popup monitor unavailable"), 503
+    return jsonify(popup_monitor.stop())
+
+
+@app.route("/api/popup_monitor/analyze", methods=["POST", "GET"])
+def api_popup_monitor_analyze():
+    if popup_monitor is None:
+        return jsonify(ok=False, error="popup monitor unavailable"), 503
+    return jsonify(popup_monitor.analyze_once())
+
+
+@app.route("/api/popup_monitor/events")
+def api_popup_monitor_events():
+    if popup_monitor is None:
+        return jsonify(ok=False, running=False, events=[], error="popup monitor unavailable"), 200
+    try:
+        limit = int(request.args.get("limit") or 50)
+    except Exception:
+        limit = 50
+    return jsonify(ok=True, events=popup_monitor.events(limit=limit))
+
+
+@app.route("/popup_monitor")
+@app.route("/popup-monitor")
+def popup_monitor_page():
+    return Response(
+        "<!doctype html><html><head><title>Popup Monitor</title></head><body>"
+        "<h2>Popup Monitor</h2>"
+        "<p><a href='/monitor'>Monitor</a> &middot; <a href='/learning'>Learning</a></p>"
+        "<pre id=s>loading...</pre>"
+        "<script>fetch('/api/popup_monitor/status').then(r=>r.json()).then(j=>{document.getElementById('s').textContent=JSON.stringify(j,null,2)});</script>"
+        "</body></html>",
+        mimetype="text/html",
+    )
 
 @app.route("/channel_surf")
 def channel_surf_page() -> Response:
