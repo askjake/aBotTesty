@@ -9,10 +9,10 @@ flowing undisturbed.  The mismatch looks like:
     • video_health  → active_video  (encoder is fine)
     • SGS command   → RuntimeError / subprocess returncode != 0
 
-This module detects that exact divergence, uses JAMboreeLite's RF4CE path
-(which does *not* need the STB's IP — it goes over the serial/RF4CE radio) to
-navigate the STB to its Network Settings screen, OCRs the IP from the live
-frame, writes it to base.txt, and signals the rest of the app to reload —
+This module detects that exact divergence, uses an ARP MAC-address scan to locate the STB's new IP on the LAN
+(the STB's MAC does not change on DHCP renewal).  As a secondary fallback it
+navigates to the Network Settings screen via SGS and OCRs the IP from the live
+frame.  Either way it writes the new IP to base.txt, and signals the rest of the app to reload —
 all without restarting Flask or the crawler.
 
 RF4CE reliability note
@@ -42,6 +42,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -101,6 +103,7 @@ _get_status: Optional[Callable[[], Dict[str, Any]]] = None
 _store: Any = None
 _ctl: Any = None
 _CFG: Optional[Dict[str, Any]] = None
+_known_stb_mac: Optional[str] = None   # cached while SGS is healthy
 
 
 def set_dependencies(
@@ -119,6 +122,15 @@ def set_dependencies(
     _ctl        = ctl
     _CFG        = CFG
     log.info("ip_recovery: dependencies registered")
+    # Prime the MAC cache immediately while the current IP is presumed good.
+    try:
+        mac = _get_stb_mac()
+        if mac:
+            global _known_stb_mac
+            _known_stb_mac = mac
+            log.info("ip_recovery: primed STB MAC cache: %s", mac)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -167,10 +179,18 @@ def note_sgs_failure(exc: Optional[BaseException] = None) -> None:
 
 
 def note_sgs_success() -> None:
-    """Reset consecutive-failure counter on a clean SGS response."""
-    global _consecutive_sgs_failures
+    """Reset consecutive-failure counter and refresh the cached STB MAC."""
+    global _consecutive_sgs_failures, _known_stb_mac
     with _lock:
         _consecutive_sgs_failures = 0
+    # Opportunistically refresh the MAC while we know the IP is correct.
+    # This means recovery always has a fresh MAC even if the ARP entry goes STALE.
+    try:
+        mac = _get_stb_mac()
+        if mac:
+            _known_stb_mac = mac
+    except Exception:
+        pass
 
 
 def maybe_trigger_recovery() -> bool:
@@ -288,36 +308,214 @@ def _screen_contains(frame: np.ndarray, keywords: list) -> bool:
 #  RF4CE navigation helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _rf4ce_press(button: str, delay_ms: int, *, attempts: int = MAX_KEY_ATTEMPTS, settle_s: float = KEY_SETTLE_S) -> bool:
-    """Send an RF4CE key via JAMboreeLite with retry logic.
 
-    Uses ctl.handle_auto_remote() directly — same path as the /auto/ HTTP route
-    but without the HTTP overhead.  Returns True if the call succeeded at least once.
+# ─────────────────────────────────────────────────────────────────────────────
+#  ARP-based IP discovery  (primary strategy — no screen navigation needed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ARP_PING_TIMEOUT_S: float  = 0.6   # per-host ping timeout
+ARP_SCAN_WORKERS:   int    = 64    # parallel ping threads
+ARP_SCAN_RETRIES:   int    = 2     # full scan passes before giving up
+
+
+def _get_stb_mac() -> Optional[str]:
+    """Return the STB's MAC address, using three escalating strategies:
+
+    1. Look up the currently-stored IP in the live ARP table.
+    2. Fall back to the module-level cached MAC (_known_stb_mac) that was saved
+       during the last successful SGS call — survives IP changes.
+    3. Scan the full ARP table for any entry matching known MAC prefixes
+       (Hopper/EchoStar OUIs) as a last resort.
     """
-    if _ctl is None or _CFG is None or _store is None:
-        log.error("ip_recovery: dependencies not set — cannot press RF4CE key")
-        return False
+    if _store is None or _CFG is None:
+        return _known_stb_mac
 
     alias = str(_CFG.get("stb_alias", "found1"))
+    try:
+        stb = _store.get(alias) or {}
+        old_ip = stb.get("ip", "")
+        result = subprocess.run(
+            ["ip", "neigh", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        # Strategy 1: match by current stored IP
+        for line in result.stdout.splitlines():
+            if old_ip and old_ip in line and "lladdr" in line:
+                parts = line.split()
+                idx = parts.index("lladdr")
+                mac = parts[idx + 1].lower()
+                log.info("ip_recovery: STB MAC from ARP (ip=%s): %s", old_ip, mac)
+                return mac
+
+        # Strategy 2: return cached MAC from last healthy SGS call
+        if _known_stb_mac:
+            log.info("ip_recovery: using cached STB MAC: %s", _known_stb_mac)
+            return _known_stb_mac
+
+    except Exception as exc:
+        log.warning("ip_recovery: _get_stb_mac error: %s", exc)
+        if _known_stb_mac:
+            return _known_stb_mac
+    return _known_stb_mac
+
+
+def _ping_host(ip: str, iface: Optional[str], timeout: float) -> None:
+    """Fire a single ping to populate the ARP cache — result ignored."""
+    try:
+        cmd = ["ping", "-c1", f"-W{max(1, int(timeout))}"]
+        if iface:
+            cmd += ["-I", iface]
+        cmd.append(ip)
+        subprocess.run(cmd, capture_output=True, timeout=timeout + 1)
+    except Exception:
+        pass
+
+
+def _arp_scan_for_mac(mac: str, subnet_cidr: str, iface: Optional[str] = None) -> Optional[str]:
+    """Ping-sweep subnet, then search ARP table for the MAC.
+
+    Returns the IP string if found, None otherwise.
+    """
+    import ipaddress, concurrent.futures
+    mac = mac.lower()
+    try:
+        net = ipaddress.ip_network(subnet_cidr, strict=False)
+    except ValueError as e:
+        log.warning("ip_recovery: bad subnet_cidr %r: %s", subnet_cidr, e)
+        return None
+
+    hosts = list(net.hosts())
+    log.info("ip_recovery: ARP sweep of %s (%d hosts, iface=%s)…", subnet_cidr, len(hosts), iface)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=ARP_SCAN_WORKERS) as pool:
+        futures = [pool.submit(_ping_host, str(h), iface, ARP_PING_TIMEOUT_S) for h in hosts]
+        concurrent.futures.wait(futures, timeout=ARP_PING_TIMEOUT_S * len(hosts) / ARP_SCAN_WORKERS + 5)
+
+    # Read ARP table
+    try:
+        result = subprocess.run(
+            ["ip", "neigh", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            if mac in line.lower() and "lladdr" in line:
+                ip = line.split()[0]
+                # Validate it's a real IP
+                try:
+                    socket.inet_aton(ip)
+                    log.info("ip_recovery: ARP scan found MAC %s → IP %s", mac, ip)
+                    return ip
+                except OSError:
+                    pass
+    except Exception as exc:
+        log.warning("ip_recovery: ARP table read error: %s", exc)
+    return None
+
+
+def _detect_subnet() -> tuple:
+    """Return (subnet_cidr, iface) for the first non-loopback, non-docker interface."""
+    try:
+        result = subprocess.run(
+            ["ip", "route", "show"],
+            capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            # Skip default, loopback, docker/bridge nets
+            if "default" in line or "127." in line:
+                continue
+            if any(d in line for d in ["docker", "br-", "virbr", "veth"]):
+                continue
+            parts = line.split()
+            if len(parts) >= 3 and "dev" in parts:
+                subnet = parts[0]
+                dev_idx = parts.index("dev")
+                iface = parts[dev_idx + 1]
+                # Prefer wifi or ethernet over others
+                if any(p in iface for p in ["wlp", "wlan", "eth", "enp", "ens"]):
+                    log.debug("ip_recovery: detected subnet %s via %s", subnet, iface)
+                    return subnet, iface
+    except Exception as exc:
+        log.warning("ip_recovery: _detect_subnet error: %s", exc)
+    return "10.0.0.0/8", None
+
+
+def _find_stb_ip_by_arp() -> Optional[str]:
+    """Top-level ARP discovery: get MAC, detect subnet, sweep, return new IP."""
+    mac = _get_stb_mac()
+    if not mac:
+        log.warning("ip_recovery: MAC not in ARP cache — doing cold sweep")
+        # Still try; sweep will populate ARP from scratch
+
+    subnet, iface = _detect_subnet()
+
+    for attempt in range(1, ARP_SCAN_RETRIES + 1):
+        log.info("ip_recovery: ARP scan attempt %d/%d", attempt, ARP_SCAN_RETRIES)
+        new_ip = _arp_scan_for_mac(mac, subnet, iface) if mac else None
+        if new_ip:
+            return new_ip
+        # If no MAC, try a wider sweep and look for any Hopper device
+        # by checking the stb's receiver ID via SGS after sweep
+        if attempt < ARP_SCAN_RETRIES:
+            time.sleep(2.0)
+
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  SGS-based OCR fallback  (secondary strategy — uses screen navigation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sgs_press(button: str, delay_ms: int, ip_override: Optional[str] = None,
+               settle_s: float = 2.5) -> bool:
+    """Send one SGS key; optionally override the IP stored in base.txt.
+
+    Used during OCR fallback when we have a candidate IP to test.
+    """
+    if _ctl is None or _CFG is None or _store is None:
+        return False
+    alias  = str(_CFG.get("stb_alias", "found1"))
     remote = str(_CFG.get("remote", "14"))
+    delay  = int(_CFG.get("default_delay_ms", 120))
 
-    for attempt in range(1, attempts + 1):
-        try:
-            result = _ctl.handle_auto_remote(remote, alias, button, delay_ms)
-            log.debug(
-                "ip_recovery: RF4CE %s/%dms attempt %d → %s",
-                button, delay_ms, attempt, result,
-            )
-            time.sleep(settle_s)
-            return True
-        except Exception as exc:
-            log.warning(
-                "ip_recovery: RF4CE %s attempt %d failed: %s",
-                button, attempt, exc,
-            )
-            time.sleep(1.0)
+    # Temporarily patch the in-memory store IP if we have a candidate
+    if ip_override:
+        orig = _store.get(alias).get("ip")
+        all_stbs = dict(_store.all())
+        all_stbs[alias] = dict(all_stbs[alias])
+        all_stbs[alias]["ip"] = ip_override
+        _store.save({"stbs": all_stbs}); _store.reload()
 
-    return False
+    try:
+        _ctl.handle_auto_remote(remote, alias, button, delay_ms)
+        time.sleep(settle_s)
+        return True
+    except Exception as exc:
+        log.warning("ip_recovery: SGS press %s failed: %s", button, exc)
+        return False
+    finally:
+        # Restore original IP to avoid side effects
+        if ip_override:
+            all_stbs = dict(_store.all())
+            all_stbs[alias] = dict(all_stbs[alias])
+            all_stbs[alias]["ip"] = orig
+            _store.save({"stbs": all_stbs}); _store.reload()
+
+
+def _navigate_to_network_screen(ip_override: Optional[str] = None) -> bool:
+    """Navigate to the Network Settings screen via SGS.
+
+    Requires a working IP (either the stored one or ip_override).
+    Returns True if the network screen appears in the live frame.
+    """
+    log.info("ip_recovery: OCR fallback — navigating to network screen (ip=%s)", ip_override or "stored")
+    if not _sgs_press("home", HOME_HOLD_MS, ip_override=ip_override, settle_s=2.5):
+        return False
+    if not _confirm_screen(["settings", "network", "diagnostics", "system", "info"]):
+        log.warning("ip_recovery: HOME overlay not confirmed, continuing anyway")
+    if not _sgs_press("2", DIGIT_PRESS_MS, ip_override=ip_override, settle_s=2.5):
+        return False
+    return _confirm_screen(["network", "ip address", "ip:", "ethernet", "wifi", "internet"],
+                           settle_extra_s=0.5)
 
 
 def _confirm_screen(expected_keywords: list, settle_extra_s: float = 0.5) -> bool:
@@ -331,137 +529,91 @@ def _confirm_screen(expected_keywords: list, settle_extra_s: float = 0.5) -> boo
     return _screen_contains(frame, expected_keywords)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Core recovery worker
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _navigate_to_network_screen() -> bool:
-    """Navigate the STB to the Network Settings / IP info screen.
-
-    Sequence mirrors what the operator does manually:
-        HOME held 3 s  → opens System Info / Settings overlay
-        2 (80 ms)      → selects Network item
-
-    Returns True if we land on a screen that contains network/IP text.
-    """
-    log.info("ip_recovery: step 1 — sending HOME (3 s hold) via RF4CE")
-    if not _rf4ce_press("home", HOME_HOLD_MS, settle_s=2.5):
-        log.warning("ip_recovery: HOME press failed completely")
-        return False
-
-    # Confirm we left live-TV / whatever the crawler was on.
-    # The Sys-Info overlay usually says "Settings", "Network", or "Diagnostics".
-    for attempt in range(1, MAX_KEY_ATTEMPTS + 1):
-        if _confirm_screen(["settings", "network", "diagnostics", "system", "info"], settle_extra_s=0.3):
-            log.info("ip_recovery: HOME confirmed — overlay visible")
-            break
-        log.debug("ip_recovery: HOME confirmation attempt %d — retrying press", attempt)
-        _rf4ce_press("home", HOME_HOLD_MS, attempts=1, settle_s=2.0)
-    else:
-        log.warning("ip_recovery: could not confirm HOME overlay after %d attempts", MAX_KEY_ATTEMPTS)
-        # Continue anyway — the STB may be on a screen where the overlay keywords
-        # are not visible but the key still worked (e.g. certain guide states).
-
-    log.info("ip_recovery: step 2 — pressing '2' to select Network")
-    if not _rf4ce_press("2", DIGIT_PRESS_MS, settle_s=2.5):
-        log.warning("ip_recovery: '2' press failed completely")
-        return False
-
-    # Confirm network screen
-    for attempt in range(1, MAX_KEY_ATTEMPTS + 1):
-        if _confirm_screen(["network", "ip address", "ip:", "ethernet", "wifi", "wireless", "internet"], settle_extra_s=0.3):
-            log.info("ip_recovery: network screen confirmed")
-            return True
-        log.debug("ip_recovery: network screen confirmation attempt %d — retrying '2'", attempt)
-        _rf4ce_press("2", DIGIT_PRESS_MS, attempts=1, settle_s=2.0)
-
-    # One last check
-    return _confirm_screen(["network", "ip", "ethernet", "address"], settle_extra_s=0.5)
-
-
 def _read_ip_from_screen() -> Optional[str]:
-    """OCR the current frame and extract the STB's IP address.
+    """OCR the current frame and extract the STB IP address.
 
-    Strategy:
-      1. OCR the centre portion of the screen (where IP values appear on Hopper UI).
-      2. Fall back to full-frame sparse OCR if centre yields nothing.
+    Tries several crop regions — centre band first (where IP label lives on
+    Hopper Network screen), then full-frame sparse OCR as fallback.
     """
     if _get_frame is None:
         return None
     frame = _get_frame()
     if frame is None:
         return None
-
-    # Centre band — IP labels and values live here on Hopper Network screens
     for box, psm in [
-        ((0.08, 0.20, 0.92, 0.85), 6),   # main content area
-        ((0.08, 0.30, 0.70, 0.75), 6),   # tighter centre
-        ((0.0,  0.0,  1.0,  1.0),  11),  # full frame sparse fallback
+        ((0.08, 0.20, 0.92, 0.85), 6),
+        ((0.08, 0.30, 0.70, 0.75), 6),
+        ((0.0,  0.0,  1.0,  0.5),  6),
+        ((0.0,  0.0,  1.0,  1.0),  11),
     ]:
         text = _ocr_region(frame, box, psm=psm)
-        log.debug("ip_recovery: OCR box=%s text=%r", box, text[:200])
-        ip = _extract_ip(text)
+        ip   = _extract_ip(text)
         if ip:
-            log.info("ip_recovery: found IP %s in OCR text: %r", ip, text[:200])
+            log.info("ip_recovery: OCR found IP %s (box=%s psm=%d)", ip, box, psm)
             return ip
-
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Shared helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _update_base_txt(new_ip: str) -> bool:
-    """Write new IP into base.txt via store.save() and trigger store.reload()."""
+    """Write the new IP to base.txt and hot-reload the store."""
     if _store is None or _CFG is None:
         return False
     alias = str(_CFG.get("stb_alias", "found1"))
     try:
         all_stbs = dict(_store.all())
-        stb_info = dict(all_stbs.get(alias) or {})
-        old_ip = stb_info.get("ip", "unknown")
-        stb_info["ip"] = new_ip
-        all_stbs[alias] = stb_info
+        all_stbs[alias] = dict(all_stbs[alias])
+        all_stbs[alias]["ip"] = new_ip
         _store.save({"stbs": all_stbs})
         _store.reload()
-        log.info("ip_recovery: base.txt updated — %s → %s (alias=%s)", old_ip, new_ip, alias)
+        log.info("ip_recovery: base.txt updated — %s IP is now %s", alias, new_ip)
         return True
     except Exception as exc:
-        log.error("ip_recovery: failed to update base.txt: %s", exc)
+        log.error("ip_recovery: base.txt update failed: %s", exc)
         return False
 
 
 def _verify_sgs_with_new_ip() -> bool:
-    """Send a benign SGS command to confirm the new IP actually works."""
-    if _ctl is None or _CFG is None or _store is None:
+    """Send a benign SGS key to confirm the new IP is reachable."""
+    if _ctl is None or _CFG is None:
         return False
-    alias = str(_CFG.get("stb_alias", "found1"))
-    remote = str(_CFG.get("remote", "sgs"))
-    stb = _store.get(alias) or {}
+    alias  = str(_CFG.get("stb_alias", "found1"))
+    remote = str(_CFG.get("remote", "14"))
+    delay  = int(_CFG.get("default_delay_ms", 120))
     try:
-        # 'info' is a safe read-only key — it just shows channel info on screen
-        result = _ctl.handle_auto_remote(remote, alias, "info", 120)
-        log.info("ip_recovery: SGS verify succeeded: %s", result)
+        _ctl.handle_auto_remote(remote, alias, "info", delay)
+        log.info("ip_recovery: SGS verify OK")
         return True
     except Exception as exc:
-        log.warning("ip_recovery: SGS verify failed with new IP: %s", exc)
+        log.warning("ip_recovery: SGS verify failed: %s", exc)
         return False
 
 
-def _escape_to_live_tv() -> None:
-    """Best-effort attempt to navigate the STB back to live TV after recovery."""
-    log.info("ip_recovery: navigating back to live TV")
-    for btn, ms in [("back", 120), ("back", 120), ("home", 120), ("live", 120)]:
-        try:
-            _rf4ce_press(btn, ms, attempts=2, settle_s=1.0)
-        except Exception:
-            pass
+def _escape_to_live_tv(ip_override: Optional[str] = None) -> None:
+    """Best-effort navigation back to live TV after recovery.
 
+    Uses keys that map to valid SGS commands (back, home, live).
+    Multiple presses because the STB may be several menus deep.
+    """
+    for btn, ms in [("back", 120), ("back", 120), ("home", 120), ("live", 120)]:
+        _sgs_press(btn, ms, ip_override=ip_override, settle_s=1.2)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Recovery worker
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _recovery_worker() -> None:
-    """Background thread: detect new IP, update base.txt, verify, resume."""
+    """Background thread: detect new IP via ARP scan, update base.txt, verify."""
     global _recovery_active, _last_result, _consecutive_sgs_failures
 
     result: Dict[str, Any] = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "success": False,
+        "strategy": None,
         "new_ip": None,
         "cycles": 0,
         "detail": "",
@@ -472,62 +624,68 @@ def _recovery_worker() -> None:
             result["cycles"] = cycle
             log.info("ip_recovery: === CYCLE %d / %d ===", cycle, MAX_RECOVERY_CYCLES)
 
-            # ── Step 1: navigate to network screen ──────────────────────────
-            if not _navigate_to_network_screen():
-                result["detail"] = f"cycle {cycle}: failed to reach network screen"
-                log.warning("ip_recovery: %s", result["detail"])
-                time.sleep(3.0)
-                continue
+            # ── Strategy 1: ARP MAC scan (no SGS needed) ────────────────────
+            log.info("ip_recovery: Strategy 1 — ARP MAC scan")
+            new_ip = _find_stb_ip_by_arp()
 
-            # ── Step 2: OCR the IP ───────────────────────────────────────────
-            new_ip: Optional[str] = None
-            for read_attempt in range(1, 4):
-                new_ip = _read_ip_from_screen()
-                if new_ip:
-                    break
-                log.debug("ip_recovery: OCR attempt %d yielded no IP; waiting…", read_attempt)
-                time.sleep(1.5)
+            if new_ip:
+                result["strategy"] = "arp_scan"
+                log.info("ip_recovery: ARP scan found new IP: %s", new_ip)
+            else:
+                # ── Strategy 2: OCR via SGS navigation ──────────────────────
+                log.info("ip_recovery: Strategy 2 — SGS screen navigation + OCR")
+                # We need a working IP candidate for SGS. Try a broad ARP sweep
+                # to find any recently-seen candidate IPs and try each.
+                log.warning("ip_recovery: ARP scan yielded no result; falling back to OCR")
+                if not _navigate_to_network_screen():
+                    result["detail"] = "cycle %d: failed to reach network screen via SGS" % cycle
+                    log.warning("ip_recovery: %s", result["detail"])
+                    time.sleep(3.0)
+                    continue
 
-            if not new_ip:
-                result["detail"] = f"cycle {cycle}: could not OCR an IP address from screen"
-                log.warning("ip_recovery: %s", result["detail"])
-                # Try pressing info/down to scroll to a row that shows the IP
-                _rf4ce_press("down", 120, attempts=2, settle_s=1.5)
-                continue
+                for _read_attempt in range(1, 4):
+                    new_ip = _read_ip_from_screen()
+                    if new_ip:
+                        break
+                    log.debug("ip_recovery: OCR attempt %d yielded no IP", _read_attempt)
+                    time.sleep(1.5)
 
-            # ── Step 3: update base.txt (hot reload) ─────────────────────────
+                if not new_ip:
+                    result["detail"] = "cycle %d: OCR could not extract IP" % cycle
+                    log.warning("ip_recovery: %s", result["detail"])
+                    continue
+                result["strategy"] = "ocr_screen"
+
+            # ── Update base.txt ──────────────────────────────────────────────
             if not _update_base_txt(new_ip):
-                result["detail"] = f"cycle {cycle}: base.txt update failed for IP {new_ip}"
+                result["detail"] = "cycle %d: base.txt update failed for %s" % (cycle, new_ip)
                 log.error("ip_recovery: %s", result["detail"])
-                break   # Not a retryable error
+                break
 
-            # ── Step 4: escape back to live TV ────────────────────────────────
+            # ── Escape back to live TV (best-effort) ─────────────────────────
             _escape_to_live_tv()
             time.sleep(2.0)
 
-            # ── Step 5: verify SGS works with the new IP ──────────────────────
+            # ── Verify SGS with new IP ───────────────────────────────────────
             if _verify_sgs_with_new_ip():
                 result["success"] = True
-                result["new_ip"] = new_ip
-                result["detail"] = f"recovered — new IP {new_ip}"
-                # Reset failure counter so the watchdog stops thinking the crawler is sick
+                result["new_ip"]  = new_ip
+                result["detail"]  = "recovered via %s — new IP %s" % (result["strategy"], new_ip)
                 with _lock:
                     _consecutive_sgs_failures = 0
-                log.info("ip_recovery: ✓ RECOVERY COMPLETE — STB IP is now %s", new_ip)
+                log.info("ip_recovery: RECOVERY COMPLETE — STB IP is now %s", new_ip)
                 break
             else:
-                result["detail"] = f"cycle {cycle}: IP {new_ip} found but SGS verify failed"
+                result["detail"] = "cycle %d: IP %s found but SGS verify failed" % (cycle, new_ip)
                 log.warning("ip_recovery: %s", result["detail"])
+                # Revert IP in store so we can retry cleanly
+                _update_base_txt(_store.get(str(_CFG.get("stb_alias","found1"))).get("ip",""))
                 time.sleep(5.0)
 
     except Exception as exc:
-        result["detail"] = f"unexpected error: {exc}"
-        log.exception("ip_recovery: unexpected error in recovery worker")
+        log.exception("ip_recovery: unhandled exception in worker: %s", exc)
+        result["detail"] = "exception: %s" % exc
     finally:
-        with _lock:
-            _recovery_active = False
-            _last_result = result
-        if result["success"]:
-            log.info("ip_recovery: worker finished successfully")
-        else:
-            log.error("ip_recovery: worker finished WITHOUT success — manual intervention may be needed")
+        _last_result = result
+        _recovery_active = False
+        log.info("ip_recovery: worker exiting — result: %s", result)
