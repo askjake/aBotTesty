@@ -53,6 +53,7 @@ from ppv_purchase_agent import PPVPurchaseAgent  # noqa: E402
 from human_playbooks import all_playbooks, playbooks_for_cues, backlog_from_graph  # noqa: E402
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
+import ip_recovery  # auto IP-change detection & self-healing
 from learning_dataset_writer import LearningDatasetWriter  # noqa: E402
 from vlm_remote_trainer import VLMRemoteJob, prepare_job_files, submit_job  # noqa: E402
 from vlm_model_manager import VLMModelManager  # noqa: E402
@@ -346,8 +347,13 @@ def press_button(button: str, delay_ms: int | None = None) -> Dict[str, Any]:
     delay = int(delay_ms if delay_ms is not None else CFG["default_delay_ms"])
     if not store.get(alias):
         raise ValueError(f"STB alias '{alias}' is not present in base.txt")
-    result = ctl.handle_auto_remote(remote, alias, button, delay)
-    return {"ok": True, "alias": alias, "button": button, "delay_ms": delay, "result": result}
+    try:
+        result = ctl.handle_auto_remote(remote, alias, button, delay)
+        ip_recovery.note_sgs_success()
+        return {"ok": True, "alias": alias, "button": button, "delay_ms": delay, "result": result}
+    except Exception as _sgs_exc:
+        ip_recovery.note_sgs_failure(_sgs_exc)
+        raise
 
 
 def press_sequence(keys: Iterable[str], delay_ms: int | None = None, gap_s: float = 0.2) -> Dict[str, Any]:
@@ -704,6 +710,15 @@ def _crawler_watchdog_worker() -> None:
 
 
 _CRAWLER_WATCHDOG_THREAD = threading.Thread(target=_crawler_watchdog_worker, name="CrawlerWatchdog", daemon=True)
+
+# ── ip_recovery: register singletons so it can grab frames and talk to the STB ──
+ip_recovery.set_dependencies(
+    get_frame=monitor.get_frame,
+    get_status=monitor.get_status,
+    store=store,
+    ctl=ctl,
+    CFG=CFG,
+)
 _CRAWLER_WATCHDOG_THREAD.start()
 
 
@@ -811,6 +826,7 @@ def monitor_page() -> Response:
 <body>
 <header>
   <div><b>Merged Active Video + JAMboree Lite SGS</b> <span class="pill">STB: {alias}</span></div>
+  <div id="ip_rec_status" style="font-size:0.78em;color:#f59e0b;margin-top:2px;display:none;">⚠ IP Recovery Active</div>
   <div id="signal" class="pill">checking…</div>
 </header>
 <main>
@@ -907,6 +923,13 @@ setInterval(refresh, 1000); setInterval(refreshTeach, 1500); refresh(); refreshT
         mimetype="text/html",
     )
 
+
+
+
+@app.route("/api/ip_recovery/status")
+def api_ip_recovery_status():
+    """Return the current IP-recovery subsystem status."""
+    return jsonify(ip_recovery.get_recovery_status())
 
 @app.route("/api/status")
 def api_status():
