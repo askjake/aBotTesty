@@ -211,7 +211,7 @@ def send_sgs(
         logging.debug(" → curl: %s", curl_dbg)
         logging.debug(" → cmd: %s", " ".join(cmd))
 
-    completed = subprocess.run(cmd, capture_output=True, text=True)
+    completed = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     if completed.returncode != 0:
         raise RuntimeError(completed.stderr or completed.stdout or "sgs_remote error")
     return completed.stdout.strip()
