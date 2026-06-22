@@ -3214,5 +3214,51 @@ def main() -> None:
     app.run(host=host, port=port, debug=False, threaded=True)
 
 
+
+# ── VLM Auto-Train API routes (vlm-auto-train-routes-20260617) ──────────
+
+@app.route("/api/learning/auto_train/history", methods=["GET"])
+def api_vlm_auto_train_history():
+    try:
+        from vlm_auto_train import latest_auto_train_record
+        record = latest_auto_train_record(root=str(ROOT))
+        return jsonify(ok=True, record=record)
+    except Exception as exc:
+        log.exception("auto_train history error")
+        return jsonify(ok=False, error=str(exc)), 500
+
+
+@app.route("/api/learning/auto_train/trigger", methods=["POST"])
+def api_vlm_auto_train_trigger():
+    import threading
+    try:
+        from vlm_auto_train import auto_train_pipeline
+        data = request.get_json(silent=True) or {}
+        execute        = bool(data.get("execute",        False))
+        dry_run_export = bool(data.get("dry_run_export", False))
+        kwargs = dict(
+            root           = str(ROOT),
+            execute        = execute,
+            dry_run_export = dry_run_export,
+            min_screen     = int(data.get("min_screen",  250)),
+            min_policy     = int(data.get("min_policy",  250)),
+            min_verify     = int(data.get("min_verify",  250)),
+            min_images     = int(data.get("min_images",  100)),
+            hardware       = str(data.get("hardware",    "2x3090")),
+            log_file       = str(ROOT / "logs" / "vlm_auto_train.log"),
+        )
+        t = threading.Thread(target=auto_train_pipeline, kwargs=kwargs, daemon=True)
+        t.start()
+        return jsonify(
+            ok=True,
+            message="Auto-train pipeline started in background.",
+            execute=execute,
+            dry_run_export=dry_run_export,
+        )
+    except Exception as exc:
+        log.exception("auto_train trigger error")
+        return jsonify(ok=False, error=str(exc)), 500
+
+# vlm-auto-train-routes-20260617
 if __name__ == "__main__":
     main()
