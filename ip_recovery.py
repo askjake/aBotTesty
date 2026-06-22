@@ -86,6 +86,13 @@ IP_RE_BROAD = re.compile(
     r"(?<![\d.])(" + _OCT + r"\." + _OCT + r"\." + _OCT + r"\." + _OCT + r")(?![\d.])"
 )
 
+# Backup HTTP controller — independent of STB IP, used when SGS is down.
+# URL: {BACKUP_HTTP_BASE}/{command}/{duration_ms}
+# e.g. http://10.79.85.47:5003/auto/14/Jim's%20STB/home/3000
+BACKUP_HTTP_BASE: str        = "http://10.79.85.47:5003/auto/14/Jim's%20STB"
+BACKUP_HTTP_DEFAULT_MS: int  = 80
+BACKUP_HTTP_TIMEOUT_S: float = 10.0
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  State
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +129,10 @@ def set_dependencies(
     _ctl        = ctl
     _CFG        = CFG
     log.info("ip_recovery: dependencies registered")
-    # Prime the MAC cache immediately while the current IP is presumed good.
+    # Prime the MAC cache: one immediate attempt, then a background retry loop.
+    # The immediate attempt usually misses because ARP hasn't resolved yet;
+    # the background thread catches it within a few seconds of the first
+    # successful SGS call (note_sgs_success also refreshes the cache).
     try:
         mac = _get_stb_mac()
         if mac:
@@ -131,6 +141,28 @@ def set_dependencies(
             log.info("ip_recovery: primed STB MAC cache: %s", mac)
     except Exception:
         pass
+
+    def _delayed_mac_prime() -> None:
+        """Retry MAC priming at 5 s, 20 s, and 60 s after startup."""
+        global _known_stb_mac
+        for wait_s in (5.0, 15.0, 40.0):
+            time.sleep(wait_s)
+            if _known_stb_mac:
+                return   # already primed by note_sgs_success or earlier attempt
+            try:
+                mac = _get_stb_mac()
+                if mac:
+                    _known_stb_mac = mac
+                    log.info(
+                        "ip_recovery: delayed MAC prime succeeded (wait=%.0fs): %s",
+                        wait_s, mac,
+                    )
+                    return
+            except Exception:
+                pass
+        log.warning("ip_recovery: delayed MAC prime exhausted all attempts — MAC still unknown")
+
+    threading.Thread(target=_delayed_mac_prime, name="MACPrimeWorker", daemon=True).start()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -413,7 +445,49 @@ def _arp_scan_for_mac(mac: str, subnet_cidr: str, iface: Optional[str] = None) -
 
 
 def _detect_subnet() -> tuple:
-    """Return (subnet_cidr, iface) for the first non-loopback, non-docker interface."""
+    """Return (subnet_cidr, iface) to ARP-sweep for the STB.
+
+    Strategy (in order):
+    1. Derive a /24 from the STB's last-known stored IP — almost always
+       correct regardless of which NIC the host uses to reach it.
+    2. Walk ``ip route`` for an explicit route matching that /24.
+    3. Fall back to the first non-loopback, non-docker route on the host.
+    """
+    import ipaddress as _ipa
+
+    # ── Strategy 1: subnet derived from the STB's stored IP ─────────────
+    if _store is not None and _CFG is not None:
+        try:
+            alias     = str(_CFG.get("stb_alias", "found1"))
+            stb       = _store.get(alias) or {}
+            stored_ip = stb.get("ip", "")
+            if stored_ip:
+                net         = _ipa.ip_network(stored_ip + "/24", strict=False)
+                subnet_cidr = str(net)
+                prefix      = stored_ip.rsplit(".", 1)[0]   # e.g. "10.73.185"
+                iface       = None
+                try:
+                    result = subprocess.run(
+                        ["ip", "route", "show"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    for line in result.stdout.splitlines():
+                        if prefix in line and "dev" in line:
+                            parts   = line.split()
+                            dev_idx = parts.index("dev")
+                            iface   = parts[dev_idx + 1]
+                            break
+                except Exception:
+                    pass
+                log.info(
+                    "ip_recovery: subnet derived from stored STB IP %s -> %s (iface=%s)",
+                    stored_ip, subnet_cidr, iface,
+                )
+                return subnet_cidr, iface
+        except Exception as exc:
+            log.warning("ip_recovery: subnet-from-stored-IP failed: %s", exc)
+
+    # ── Strategy 2/3: fall back to host route table ──────────────────────
     try:
         result = subprocess.run(
             ["ip", "route", "show"],
@@ -427,12 +501,14 @@ def _detect_subnet() -> tuple:
                 continue
             parts = line.split()
             if len(parts) >= 3 and "dev" in parts:
-                subnet = parts[0]
+                subnet  = parts[0]
                 dev_idx = parts.index("dev")
-                iface = parts[dev_idx + 1]
-                # Prefer wifi or ethernet over others
+                iface   = parts[dev_idx + 1]
                 if any(p in iface for p in ["wlp", "wlan", "eth", "enp", "ens"]):
-                    log.debug("ip_recovery: detected subnet %s via %s", subnet, iface)
+                    log.debug(
+                        "ip_recovery: detected subnet %s via %s (host-route fallback)",
+                        subnet, iface,
+                    )
                     return subnet, iface
     except Exception as exc:
         log.warning("ip_recovery: _detect_subnet error: %s", exc)
@@ -501,21 +577,81 @@ def _sgs_press(button: str, delay_ms: int, ip_override: Optional[str] = None,
             _store.save({"stbs": all_stbs}); _store.reload()
 
 
-def _navigate_to_network_screen(ip_override: Optional[str] = None) -> bool:
-    """Navigate to the Network Settings screen via SGS.
+def _backup_http_press(
+    command: str,
+    duration_ms: int = BACKUP_HTTP_DEFAULT_MS,
+    settle_s: float = 2.5,
+) -> bool:
+    """Send a key via the backup HTTP controller — does NOT need the STB IP.
 
-    Requires a working IP (either the stored one or ip_override).
-    Returns True if the network screen appears in the live frame.
+    URL: BACKUP_HTTP_BASE/{command}/{duration_ms}
+    Normal press : http://10.79.85.47:5003/auto/14/Jim's%20STB/<cmd>/80
+    Sys-Info hold: http://10.79.85.47:5003/auto/14/Jim's%20STB/home/3000
     """
-    log.info("ip_recovery: OCR fallback — navigating to network screen (ip=%s)", ip_override or "stored")
+    import urllib.request
+    import urllib.parse
+    url = f"{BACKUP_HTTP_BASE}/{urllib.parse.quote(str(command))}/{duration_ms}"
+    try:
+        log.info("ip_recovery: backup-HTTP %-6s %4dms -> %s", command, duration_ms, url)
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=BACKUP_HTTP_TIMEOUT_S) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            log.debug(
+                "ip_recovery: backup-HTTP response [%d]: %s",
+                resp.status, body[:200].strip(),
+            )
+        time.sleep(settle_s)
+        return True
+    except Exception as exc:
+        log.warning("ip_recovery: backup-HTTP press '%s' failed: %s", command, exc)
+        return False
+
+
+def _navigate_to_network_screen(ip_override: Optional[str] = None) -> bool:
+    """Navigate to the Network Settings screen to OCR the new STB IP.
+
+    Tries the backup HTTP controller first — this path is fully independent
+    of the STB's IP address and therefore works even when SGS is fully down.
+    Falls back to SGS only if the backup controller itself is unreachable.
+
+    Backup URL mapping:
+        home / 3000  ->  long-hold Home  (sys-info / Network overlay)
+        2    / 80    ->  digit 2          (Network tab on Hopper)
+    """
+    log.info("ip_recovery: OCR fallback — navigating to network screen")
+
+    # ── Primary path: backup HTTP controller (IP-independent) ───────────
+    log.info("ip_recovery: trying backup-HTTP navigation (ip-independent)")
+    home_ok = _backup_http_press("home", HOME_HOLD_MS, settle_s=2.5)
+    if home_ok:
+        if not _confirm_screen(["settings", "network", "diagnostics", "system", "info"]):
+            log.warning("ip_recovery: HOME overlay not confirmed via backup-HTTP, continuing anyway")
+        digit_ok = _backup_http_press("2", DIGIT_PRESS_MS, settle_s=2.5)
+        if digit_ok:
+            reached = _confirm_screen(
+                ["network", "ip address", "ip:", "ethernet", "wifi", "internet"],
+                settle_extra_s=0.5,
+            )
+            if reached:
+                log.info("ip_recovery: network screen reached via backup-HTTP OK")
+                return True
+            log.warning("ip_recovery: backup-HTTP sent but network screen not confirmed by OCR")
+
+    # ── Fallback path: SGS (requires a working IP) ───────────────────────
+    log.warning(
+        "ip_recovery: backup-HTTP path failed — falling back to SGS (ip=%s)",
+        ip_override or "stored",
+    )
     if not _sgs_press("home", HOME_HOLD_MS, ip_override=ip_override, settle_s=2.5):
         return False
     if not _confirm_screen(["settings", "network", "diagnostics", "system", "info"]):
-        log.warning("ip_recovery: HOME overlay not confirmed, continuing anyway")
+        log.warning("ip_recovery: HOME overlay not confirmed via SGS, continuing anyway")
     if not _sgs_press("2", DIGIT_PRESS_MS, ip_override=ip_override, settle_s=2.5):
         return False
-    return _confirm_screen(["network", "ip address", "ip:", "ethernet", "wifi", "internet"],
-                           settle_extra_s=0.5)
+    return _confirm_screen(
+        ["network", "ip address", "ip:", "ethernet", "wifi", "internet"],
+        settle_extra_s=0.5,
+    )
 
 
 def _confirm_screen(expected_keywords: list, settle_extra_s: float = 0.5) -> bool:
@@ -595,11 +731,13 @@ def _verify_sgs_with_new_ip() -> bool:
 def _escape_to_live_tv(ip_override: Optional[str] = None) -> None:
     """Best-effort navigation back to live TV after recovery.
 
-    Uses keys that map to valid SGS commands (back, home, live).
+    Tries backup HTTP first (IP-independent), then falls back to SGS.
     Multiple presses because the STB may be several menus deep.
     """
     for btn, ms in [("back", 120), ("back", 120), ("home", 120), ("live", 120)]:
-        _sgs_press(btn, ms, ip_override=ip_override, settle_s=1.2)
+        sent = _backup_http_press(btn, ms, settle_s=1.2)
+        if not sent:
+            _sgs_press(btn, ms, ip_override=ip_override, settle_s=1.2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
