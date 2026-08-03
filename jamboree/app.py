@@ -58,9 +58,13 @@ def get_stb_list():
 @app.route("/save-stb-list", methods=["POST"])
 def save_stb_list():
     payload = request.json or {}
-    store.save(payload)            # persist base.txt
-    init_serial_from_base(payload) # hot-apply alias→COM map
-    return jsonify({"success": True})
+    # v39: the settops editor posts the whole table, so deletions must work,
+    # but the form never renders lname/passwd/com_port.  replace_stbs() applies
+    # the table while carrying protected fields forward, so saving the page can
+    # no longer wipe SGS pairing credentials.
+    doc = store.replace_stbs(payload.get("stbs", payload))
+    init_serial_from_base(doc)     # hot-apply alias→COM map
+    return jsonify({"success": True, "stbs": list(doc.get("stbs", {}).keys())})
 
 # -------- endpoints the UI expects (JAMboRemote)
 @app.route("/auto/<remote>/<stb>/<button>/<int:delay>", methods=["GET"])

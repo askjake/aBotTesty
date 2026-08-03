@@ -29,7 +29,15 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent  # ← canonical base.txt location
 PROJECT_ROOT = PACKAGE_DIR.parent
-BASE_FILE    = PROJECT_ROOT / "base.txt"
+# v39: honour JAMBOREE_BASE like every other module.  sgs_lib used to hard-code
+# <project>/base.txt while jamboree.paths honoured the env var, so a relocated
+# base file meant the pairing code wrote credentials to a *different* file than
+# the one the app read them back from.
+try:
+    from .paths import BASE_PATH as _BASE_PATH_FROM_ENV
+    BASE_FILE = _BASE_PATH_FROM_ENV
+except Exception:                                   # pragma: no cover
+    BASE_FILE = PROJECT_ROOT / "base.txt"
 
 # disable insecure request warning on recent Python
 if sys.version_info >= (3, 6):
@@ -138,39 +146,52 @@ def sgs_upsert_credentials(
     Ensure base.txt has an entry for `name` and store login/passwd there.
     If the entry doesn't exist yet, create a minimal one with ip/stb if available.
     """
-    try:
-        base = sgs_load_base(path)
-    except FileNotFoundError:
-        base = {}
+    from . import base_io
 
-    stbs = base.setdefault("stbs", {})
+    existing = (base_io.read_document(path).get("stbs", {}) or {}).get(str(name) if name else "", {}) or {}
+
     if not name:
         # fallback key if no name was provided; prefer ReceiverID, then IP
         name = str(stb_id or ip or "UNNAMED")
 
-    entry = stbs.setdefault(str(name), {})
-    if stb_id and "stb" not in entry:
-        entry["stb"] = stb_id
-    if ip and "ip" not in entry:
-        entry["ip"] = ip
+    fields = {
+        "lname": login,
+        "passwd": passwd,
+        "protocol": existing.get("protocol", "SGS"),
+        "prod": True,
+    }
+    if stb_id and "stb" not in existing:
+        fields["stb"] = stb_id
+    if ip and "ip" not in existing:
+        fields["ip"] = ip
 
-    entry["lname"]  = login
-    entry["passwd"] = passwd
-    entry["protocol"] = entry.get("protocol", "SGS")
-    entry["prod"] = True
+    # v39: additive, atomic single-entry update.  The previous version rebuilt
+    # the whole document and handed it to sgs_save_base(), which rewrote the file
+    # from scratch -- fine on its own, but it raced with the store's own writes
+    # and any key it had not loaded was lost.
+    base_io.update_stb_fields(path, str(name), fields)
+    logging.info("Stored SGS credentials for %r in %s", name, path)
 
-    sgs_save_base(base, path)
 
-
-def sgs_save_base(base: dict, path: Path = BASE_FILE) -> None:
+def sgs_save_base(base: dict, path: Path = BASE_FILE, *, replace: bool = False) -> None:
    """
-   Write `base` JSON to project-root/base.txt.
+   Persist `base` to base.txt.
+
+   v39: this is now a **merge** (additive) rather than a truncating rewrite, and
+   it is atomic.  Callers historically passed a document they had loaded and
+   mutated; if anything else had written to base.txt in between -- the store
+   updating an IP, another process saving credentials -- the stale copy clobbered
+   it.  Pass ``replace=True`` only when you really intend to overwrite the
+   document wholesale.
    """
-   logging.debug("Saving base file to %s", path)
+   from . import base_io
+
+   logging.debug("Saving base file to %s (replace=%s)", path, replace)
    try:
-      path.parent.mkdir(parents=True, exist_ok=True)
-      with path.open("w", encoding="utf-8") as out:
-         json.dump(base, out, indent=2)
+      if replace:
+         base_io.write_document(path, base or {})
+      else:
+         base_io.merge_document(path, base or {})
       logging.info("Saved base config to %s", path)
    except Exception:
       logging.exception("Failed to save base config to %s", path)
@@ -611,11 +632,18 @@ class STB(object):
       if self.prod:
          # pair if login/passwd not set
          if not ((bool(self.login) and bool(self.passwd))):
-            # pair and save login passwd to file
-            if self.pair() and "stbs" in base.keys() and self.name and self.name in base["stbs"].keys():
-               base["stbs"][self.name]["passwd"] = self.passwd
-               base["stbs"][self.name]["lname"]  = self.login
-               sgs_save_base(base=base, filename=BASE_FILE_NAME)
+            # v39 BUGFIX: this used to call
+            #     sgs_save_base(base=base, filename=BASE_FILE_NAME)
+            # which could never work -- BASE_FILE_NAME is not defined anywhere in
+            # this module (NameError) and sgs_save_base() has no `filename`
+            # parameter (TypeError).  Every successful PIN pairing therefore
+            # threw before the credentials were written, so the next command ran
+            # unauthenticated and got HTTP 403 back.  pair() now persists them
+            # itself via sgs_upsert_credentials(); we only need to not crash.
+            if self.pair():
+               logging.info("Pairing succeeded for %r; credentials persisted", self.name)
+            else:
+               logging.warning("Pairing failed for %r", self.name)
          # attach if cid not set
          if (bool(self.login) and bool(self.passwd)) and (not self.cid):
             self.attach()
@@ -750,20 +778,72 @@ class STB(object):
 
    # pair PC to STB using PIN.
    # return true/false if paired or not
-   def pair(self):
+   def pairing_payload(self, command="device_pairing_start", **extra):
+       """Build the SGS pairing envelope.
+
+       Broken out so the automated pairing agent can reuse the exact same
+       payload shape the manual flow uses.
+       """
+       payload = {
+           "command":  command,
+           "receiver": self.rid,     # THIS PC's receiver id, "XAF" + local MAC
+           "stb":      self.stb,     # the receiver's CAID, e.g. R1956409151-66
+           "app":      "JAMboree",
+           "name":     "JAMboree",
+           "type":     "python",
+           "id":       "S9",         # EchoStar-assigned application id
+           "mac":      self.mac,
+       }
+       payload.update(extra)
+       return payload
+
+   def pair(self, pin_provider=None):
+       """Pair this PC with the receiver using the on-screen PIN.
+
+       Protocol (SGS device pairing):
+         1. POST ``device_pairing_start`` to ``/sgs_noauth``.  The receiver shows
+            a PIN on the TV and also logs it as "Pairing code is <pin>" in
+            /mnt/MISC_HD/esosal_log/stbCtrl/stbCtrl.0.
+         2. POST ``device_pairing_complete`` with the same envelope plus
+            ``"pin": "<pin>"``.
+         3. The reply carries ``name`` (login) and ``passwd``.  Those are the
+            HTTP digest credentials for every later authenticated SGS call.
+
+       ``pin_provider`` makes step 2 automatable: pass a zero-argument callable
+       returning the PIN string (e.g. an OCR reader).  It may be called more than
+       once -- returning a new candidate each time -- so a misread digit can be
+       retried without restarting the pairing session.  When omitted the original
+       blocking ``input()`` prompt is used, which is why this function could only
+       ever be driven by a human before.
+       """
        self.vbprint("Pair to STB")
-       querry = {"command": "device_pairing_start", "receiver": self.rid, "stb": self.stb, "app": "JAMboree",
-                 "name": "JAMboree", "type": "python", "id": "S9", "mac": self.mac}
+       querry = self.pairing_payload("device_pairing_start")
        response = self.query_noauth(querry)
-       if response["result"] != 1:
-           print("Error start pairing, result", response["result"])
+       if not response or response.get("result") != 1:
+           print("Error start pairing, result", (response or {}).get("result"), response)
            return False
-       pin = input("Please enter PIN: ")
-       querry["command"] = "device_pairing_complete"
-       querry["pin"] = pin
-       response = self.query_noauth(querry)
-       if response["result"] != 1:
-           print("Error complete pairing, result", response["result"])
+
+       attempts = 1 if pin_provider is None else 3
+       response = None
+       for attempt in range(1, attempts + 1):
+           if pin_provider is None:
+               pin = input("Please enter PIN: ")
+           else:
+               pin = pin_provider()
+               if not pin:
+                   print("PIN provider returned nothing (attempt %d/%d)" % (attempt, attempts))
+                   continue
+               self.vbprint("Using PIN %r from provider (attempt %d/%d)" % (pin, attempt, attempts))
+
+           querry["command"] = "device_pairing_complete"
+           querry["pin"] = str(pin).strip()
+           response = self.query_noauth(querry)
+           if response and response.get("result") == 1:
+               break
+           print("Error complete pairing, result", (response or {}).get("result"),
+                 "(attempt %d/%d)" % (attempt, attempts))
+
+       if not response or response.get("result") != 1:
            return False
 
        self.login = response["name"]
@@ -771,7 +851,9 @@ class STB(object):
        print("login: ", self.login)
        print("passwd:", self.passwd)
 
-       # NEW: persist to base.txt under the selected STB name
+       # Persist to base.txt under the selected STB name.  This is the ONLY
+       # place credentials are written by the pairing flow now -- STB.__init__
+       # used to try again with a broken call and blew up instead.
        try:
            sgs_upsert_credentials(
                name=self.name,
@@ -780,9 +862,22 @@ class STB(object):
                login=self.login,
                passwd=self.passwd,
            )
+           # Record provenance so a later run can tell whether the stored
+           # credentials belong to *this* PC's receiver id.
+           try:
+               from . import base_io
+               import time as _time
+               base_io.update_stb_fields(BASE_FILE, str(self.name), {
+                   "pair_rid": self.rid,
+                   "paired_ts": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+               })
+           except Exception:
+               logging.debug("could not record pairing provenance", exc_info=True)
+           logging.info("Saved SGS credentials for %r to %s", self.name, BASE_FILE)
            self.vbprint(f"Saved credentials to {BASE_FILE}")
        except Exception:
            logging.exception("Could not persist credentials to base.txt")
+           return False        # never report success if the creds did not land
 
        return True
 

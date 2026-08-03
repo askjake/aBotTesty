@@ -54,6 +54,7 @@ from human_playbooks import all_playbooks, playbooks_for_cues, backlog_from_grap
 from jamboree.app import app, ctl  # noqa: E402
 from jamboree.stb_store import store  # noqa: E402
 import ip_recovery  # auto IP-change detection & self-healing
+import sgs_autopair  # on-screen-PIN pairing + credential persistence
 from learning_dataset_writer import LearningDatasetWriter  # noqa: E402
 from vlm_remote_trainer import VLMRemoteJob, prepare_job_files, submit_job  # noqa: E402
 from vlm_model_manager import VLMModelManager  # noqa: E402
@@ -719,6 +720,14 @@ ip_recovery.set_dependencies(
     ctl=ctl,
     CFG=CFG,
 )
+
+# ── sgs_autopair: same singletons; it needs frames for PIN OCR and ctl for RF ──
+sgs_autopair.set_dependencies(
+    get_frame=monitor.get_frame,
+    store=store,
+    ctl=ctl,
+    CFG=CFG,
+)
 _CRAWLER_WATCHDOG_THREAD.start()
 
 
@@ -930,6 +939,63 @@ setInterval(refresh, 1000); setInterval(refreshTeach, 1500); refresh(); refreshT
 def api_ip_recovery_status():
     """Return the current IP-recovery subsystem status."""
     return jsonify(ip_recovery.get_recovery_status())
+
+
+# ── auto-pair (on-screen PIN) ─────────────────────────────────────────────────
+@app.route("/api/sgs/pair/status")
+def api_sgs_pair_status():
+    """Auto-pair phase/history plus whether stored credentials are usable."""
+    alias = str(request.args.get("alias") or CFG["stb_alias"])
+    out = sgs_autopair.get_status()
+    try:
+        out["credentials"] = sgs_autopair.credentials_status(alias)
+    except Exception as exc:
+        out["credentials"] = {"error": str(exc)}
+    return jsonify(out)
+
+
+@app.route("/api/sgs/pair/auto", methods=["POST"])
+def api_sgs_pair_auto():
+    """Run the full handshake: start -> OCR the PIN -> complete -> persist -> verify.
+
+    Body (all optional): alias, pin (skip OCR), force (re-pair), wait (block),
+    verify.  Default is non-blocking so the HTTP request never hangs on OCR.
+    """
+    body = request.get_json(silent=True) or {}
+    alias = str(body.get("alias") or CFG["stb_alias"])
+    kwargs = {}
+    if body.get("pin"):
+        kwargs["pin"] = str(body["pin"]).strip()
+    if "force" in body:
+        kwargs["force"] = bool(body["force"])
+    if "verify" in body:
+        kwargs["verify"] = bool(body["verify"])
+
+    if bool(body.get("wait")):
+        result = sgs_autopair.auto_pair(alias, **kwargs)
+        return jsonify(result), (200 if result.get("ok") else 500)
+
+    started = sgs_autopair.auto_pair_async(alias, **kwargs)
+    return jsonify(
+        ok=bool(started),
+        started=bool(started),
+        alias=alias,
+        detail="pairing started in background" if started
+               else "a pairing run is already active",
+        poll="/api/sgs/pair/status",
+    ), (202 if started else 409)
+
+
+@app.route("/api/sgs/pair/verify", methods=["POST", "GET"])
+def api_sgs_pair_verify():
+    """Prove commands actually work and that credentials are on disk in base.txt."""
+    alias = str((request.get_json(silent=True) or {}).get("alias")
+                or request.args.get("alias") or CFG["stb_alias"])
+    commands = sgs_autopair.verify_commands_active(alias)
+    persisted = sgs_autopair.verify_credentials_persisted(alias)
+    ok = bool(commands.get("ok")) and bool(persisted.get("on_disk"))
+    return jsonify(ok=ok, alias=alias, commands=commands, persisted=persisted), (200 if ok else 500)
+
 
 @app.route("/api/status")
 def api_status():

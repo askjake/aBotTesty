@@ -131,21 +131,41 @@ def pair_complete():
 
     ok = resp and resp.get("result") == 1
     if ok:
+        # v39: persist ADDITIVELY.
+        #
+        # This used to sgs_load_base() -> mutate -> sgs_save_base(base), i.e. a
+        # full-document rewrite.  Any field the in-memory document did not carry
+        # was silently dropped on save, which is how `lname`, `passwd` and `prod`
+        # disappeared from base.txt and left the receiver answering 403
+        # ("auth_required_or_opt_in_disabled") forever.  store.set_credentials()
+        # updates/adds only the named keys under this alias and leaves every
+        # other alias and every top-level key untouched.
+        target = None
         try:
-            base = sgs_load_base()
-            logging.debug("Loaded base.txt to store pairing creds")
-
-            # always write creds to the Hopper row
-            hopper_alias = store.get(alias)["host"] if alias else None
-            for alias_key, info in base.get("stbs", {}).items():
-                if alias_key == hopper_alias:
-                    info["lname"]  = resp["name"]
-                    info["passwd"] = resp["passwd"]
-                    sgs_save_base(base)
-                    logging.info("Updated creds for Hopper '%s'", alias_key)
-                    break
+            target = (store.get(alias) or {}).get("host") or alias if alias else None
+            if not target:
+                raise KeyError("could not resolve which alias owns these credentials")
+            store.set_credentials(
+                target,
+                resp["name"],
+                resp["passwd"],
+                prod=True,
+                pair_rid=payload.get("receiver"),
+                paired_ts=__import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+            store.reload()
+            logging.info(
+                "pair_complete: credentials stored additively for '%s' "
+                "(other fields and aliases preserved)", target,
+            )
         except Exception as e:
-            logging.error("Error saving to base.txt: %s", e)
+            logging.exception("Error saving credentials to base.txt for %r: %s", target, e)
+            # Pairing succeeded on the box but we could not persist -> tell the
+            # caller, otherwise the next request 403s with no explanation.
+            return jsonify(
+                ok=False,
+                msg=f"paired but failed to persist credentials to base.txt: {e}",
+            ), 500
 
     status_code = 200 if ok else 400
     logging.info("pair_complete result for alias='%s': %s", alias or data.get("ip"), ok)
