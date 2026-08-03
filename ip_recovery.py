@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -93,6 +94,171 @@ BACKUP_HTTP_BASE: str        = "http://10.79.85.47:5003/auto/14/Jim's%20STB"
 BACKUP_HTTP_DEFAULT_MS: int  = 80
 BACKUP_HTTP_TIMEOUT_S: float = 10.0
 
+# ── v39: how we recognise a *dead* SGS link ──────────────────────────────────
+# The old code only accepted transport-level words ("connection refused",
+# "timed out", ...).  The failure we actually hit in the field was an HTTP 403
+# from the box that had taken over the STB's DHCP lease, which matched nothing
+# and so recovery never fired.  Auth/permission failures are now first-class
+# "SGS is dead" evidence, because on this rig they mean one of:
+#   * base.txt points at a different device entirely (lease was reassigned)
+#   * the receiver was factory-reset and the pairing credentials are gone
+#   * network-remote opt-in got switched off
+SGS_DEAD_MARKERS: tuple = (
+    # transport
+    "returncode", "sgs_remote error", "connection refused", "timed out",
+    "timeout", "no route to host", "network unreachable", "failed to connect",
+    "attach failed", "non-json", "connection reset", "connection aborted",
+    "name or service not known", "host is unreachable", "broken pipe",
+    # auth / opt-in / wrong-device  (v39)
+    "auth_required_or_opt_in_disabled", "no valid crumb", "http_status\": 403",
+    "http_status\": 401", "403", "401", "unauthorized", "forbidden",
+    "json_parse_failed", "\"result\": -13", "\"result\": -3",
+    "not_paired", "pair first", "no credentials",
+    # explicit wrong-device verdict raised by _probe_device_identity()
+    "not_an_stb",
+)
+
+# Consecutive-failure thresholds.  A definite auth/wrong-device verdict is
+# strong evidence, so it needs fewer repeats than a flaky timeout.
+_SGS_FAIL_THRESHOLD_AUTH: int = 2
+
+# ── v39: STB identity fingerprinting ────────────────────────────────────────
+# Recovery used to trust the ARP table blindly: whatever MAC answered at the
+# stored IP became "the STB's MAC".  When the lease moved to a CI server the
+# cache was poisoned with that server's MAC and every later ARP sweep happily
+# re-discovered the wrong box.  We now fingerprint a candidate before believing
+# it is a receiver.
+IDENTITY_TIMEOUT_S: float = 3.0
+
+# Response headers that prove the host is *not* a set-top box.
+NON_STB_HEADER_MARKERS: tuple = (
+    "x-jenkins", "x-hudson", "x-jenkins-session", "x-atlassian-token",
+    "x-sonatype", "x-gitlab-feature-category", "x-influxdb-version",
+)
+# Body/banner substrings that prove the same thing.
+NON_STB_BODY_MARKERS: tuple = (
+    "crumbissuer", "jenkins", "hudson", "gitlab", "grafana", "kibana",
+    "phpmyadmin", "it works!", "index.html.en", "tomcat", "nginx",
+    "artifactory", "nexus repository",
+)
+# Server banners that belong to general-purpose web servers, not receivers.
+NON_STB_SERVER_MARKERS: tuple = (
+    "apache/", "nginx/", "gunicorn", "werkzeug", "iis/", "lighttpd",
+)
+
+
+def classify_sgs_failure(exc: Optional[BaseException]) -> Dict[str, Any]:
+    """Describe an SGS exception so callers can pick a threshold and a message.
+
+    Returns ``{"dead": bool, "kind": str, "threshold": int}`` where *kind* is one
+    of ``transport`` / ``auth`` / ``wrong_device`` / ``unknown``.
+    """
+    msg = (str(exc) if exc is not None else "").lower()
+    if not msg:
+        return {"dead": True, "kind": "unknown", "threshold": _SGS_FAIL_THRESHOLD}
+
+    if "not_an_stb" in msg:
+        return {"dead": True, "kind": "wrong_device", "threshold": 1}
+
+    auth_words = (
+        "auth_required_or_opt_in_disabled", "no valid crumb", "403", "401",
+        "unauthorized", "forbidden", "not_paired", "pair first",
+        "no credentials", '"result": -13',
+    )
+    if any(w in msg for w in auth_words):
+        return {"dead": True, "kind": "auth", "threshold": _SGS_FAIL_THRESHOLD_AUTH}
+
+    if any(w in msg for w in SGS_DEAD_MARKERS):
+        return {"dead": True, "kind": "transport", "threshold": _SGS_FAIL_THRESHOLD}
+
+    return {"dead": False, "kind": "unknown", "threshold": _SGS_FAIL_THRESHOLD}
+
+
+def _probe_device_identity(ip: str, timeout: float = IDENTITY_TIMEOUT_S) -> Dict[str, Any]:
+    """Decide whether ``ip`` is plausibly a DISH receiver.
+
+    Returns ``{"is_stb": True|False|None, "reason": str, "server": str}``.
+    ``None`` means "cannot tell" -- we only ever *reject* on positive evidence
+    that the host is something else, so an unreachable box is never mislabelled.
+
+    This is the guard that would have caught the 2026-08-03 incident, where
+    base.txt still pointed at a lease that had been handed to a Jenkins server.
+    """
+    try:
+        import requests  # local import: keeps module import cheap
+    except Exception:
+        return {"is_stb": None, "reason": "requests_unavailable", "server": ""}
+
+    server = ""
+    saw_response = False
+    for port, path in ((8080, "/www/sgs"), (80, "/www/sgs"), (8080, "/sgs_noauth")):
+        url = f"http://{ip}:{port}{path}"
+        try:
+            resp = requests.post(
+                url, json={"command": "get_version"},
+                timeout=timeout,
+                headers={"Content-Type": "application/json"},
+            )
+        except Exception:
+            continue
+        saw_response = True
+        headers = {k.lower(): str(v).lower() for k, v in resp.headers.items()}
+        server = headers.get("server", server)
+        body = (resp.text or "")[:2000].lower()
+
+        # 1) hard rejects -- unmistakable fingerprints of other software
+        for marker in NON_STB_HEADER_MARKERS:
+            if marker in headers:
+                return {"is_stb": False, "reason": f"header:{marker}", "server": server}
+        for marker in NON_STB_BODY_MARKERS:
+            if marker in body:
+                return {"is_stb": False, "reason": f"body:{marker}", "server": server}
+        for marker in NON_STB_SERVER_MARKERS:
+            if marker in headers.get("server", ""):
+                return {"is_stb": False, "reason": f"server:{marker}", "server": server}
+
+        # 2) positive evidence -- an SGS endpoint answers with a result envelope
+        try:
+            data = resp.json()
+            if isinstance(data, dict) and "result" in data:
+                return {"is_stb": True, "reason": "sgs_result_envelope", "server": server}
+        except Exception:
+            pass
+
+        # 3) a digest challenge from the receiver's own realm is good evidence
+        if "digest" in headers.get("www-authenticate", ""):
+            return {"is_stb": True, "reason": "digest_challenge", "server": server}
+
+    return {
+        "is_stb": None,
+        "reason": "inconclusive" if saw_response else "unreachable",
+        "server": server,
+    }
+
+
+def verify_stored_ip_identity() -> Dict[str, Any]:
+    """Fingerprint whatever currently lives at the stored STB IP.
+
+    Exposed through ``/api/ip_recovery/status`` so an operator can see at a
+    glance that base.txt is pointing at the wrong machine.
+    """
+    if _store is None or _CFG is None:
+        return {"is_stb": None, "reason": "dependencies_unset", "ip": None}
+    alias = str(_CFG.get("stb_alias", "found1"))
+    ip = ((_store.get(alias) or {}).get("ip") or "").strip()
+    if not ip:
+        return {"is_stb": None, "reason": "no_stored_ip", "ip": None}
+    out = _probe_device_identity(ip)
+    out["ip"] = ip
+    if out.get("is_stb") is False:
+        log.error(
+            "ip_recovery: stored IP %s is NOT a set-top box (%s, server=%r) - "
+            "base.txt is stale, the DHCP lease belongs to another host",
+            ip, out.get("reason"), out.get("server"),
+        )
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  State
 # ─────────────────────────────────────────────────────────────────────────────
@@ -103,6 +269,7 @@ _last_attempt_ts: float = 0.0
 _last_result: Dict[str, Any] = {}
 _consecutive_sgs_failures: int = 0
 _SGS_FAIL_THRESHOLD: int = 3       # need N consecutive fails before triggering
+_last_sgs_failure: Dict[str, Any] = {}   # v39: classification of the latest failure
 
 # Dependency handles — filled by set_dependencies()
 _get_frame: Optional[Callable[[], Optional[np.ndarray]]] = None
@@ -142,6 +309,30 @@ def set_dependencies(
     except Exception:
         pass
 
+    # v39: fingerprint whatever is at the stored IP at startup.  If base.txt is
+    # already pointing at the wrong machine, say so once, loudly, instead of
+    # letting every subsequent key press fail with an opaque 403.
+    def _startup_identity_check() -> None:
+        time.sleep(3.0)
+        try:
+            ident = verify_stored_ip_identity()
+            if ident.get("is_stb") is False:
+                log.error(
+                    "ip_recovery: STARTUP CHECK FAILED — base.txt IP %s is not a "
+                    "receiver (%s). SGS commands will fail until the IP is "
+                    "corrected; RF fallback will carry traffic meanwhile.",
+                    ident.get("ip"), ident.get("reason"),
+                )
+                maybe_trigger_recovery()
+            elif ident.get("is_stb") is True:
+                log.info("ip_recovery: startup identity check OK for %s", ident.get("ip"))
+        except Exception as exc:
+            log.debug("ip_recovery: startup identity check error: %s", exc)
+
+    threading.Thread(
+        target=_startup_identity_check, name="STBIdentityCheck", daemon=True
+    ).start()
+
     def _delayed_mac_prime() -> None:
         """Retry MAC priming at 5 s, 20 s, and 60 s after startup."""
         global _known_stb_mac
@@ -173,6 +364,11 @@ def is_sgs_dead_but_video_alive(exc: Optional[BaseException] = None) -> bool:
     """Return True when video is streaming but the last SGS call raised an error.
 
     Callers can pass the caught exception for richer logging; it is not required.
+
+    v39: classification moved to :func:`classify_sgs_failure` so that auth /
+    opt-in / wrong-device failures count as evidence.  Previously the keyword
+    list only knew about transport errors, so an HTTP 403 from a host that had
+    taken over the STB's DHCP lease scored zero matches and recovery never ran.
     """
     if _get_status is None:
         return False
@@ -183,31 +379,129 @@ def is_sgs_dead_but_video_alive(exc: Optional[BaseException] = None) -> bool:
         }
         if not video_ok:
             return False
-        if exc is not None:
-            msg = str(exc).lower()
-            # Positive signals: subprocess returncode, connection refused, timeout
-            sgs_fail = any(k in msg for k in (
-                "returncode", "sgs_remote error", "connection refused",
-                "timed out", "timeout", "no route to host", "network unreachable",
-                "failed to connect", "attach failed", "non-json",
-            ))
-            if not sgs_fail:
-                return False
+        if exc is not None and not classify_sgs_failure(exc)["dead"]:
+            return False
         return True
     except Exception:
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Auto-pair escalation (v39)
+# ─────────────────────────────────────────────────────────────────────────────
+#  A 403 / result:-13 from a host that fingerprints as a genuine receiver is a
+#  CREDENTIALS problem, not an IP problem.  Moving the IP around cannot fix it
+#  and actively makes things worse (we chase Apache/Jenkins boxes on the same
+#  subnet).  The correct response is to re-run the on-screen-PIN pairing
+#  handshake, which is what sgs_autopair does.  This module only escalates; all
+#  pairing logic lives in sgs_autopair so it stays independently testable.
+
+_AUTOPAIR_COOLDOWN_S: float = 180.0
+_autopair_last_ts: float = 0.0
+_autopair_last: Dict[str, Any] = {}
+
+
+def _maybe_trigger_autopair(reason: str, ip: str = "") -> Dict[str, Any]:
+    """Kick off a background auto-pair run, at most once per cooldown window.
+
+    Returns a dict describing what was decided so the caller (and
+    /api/ip_recovery/status) can report it honestly.
+    """
+    global _autopair_last_ts, _autopair_last
+
+    if str(os.environ.get("JAMBOREE_AUTOPAIR", "1")).lower() in ("0", "false", "no", "off"):
+        out = {"triggered": False, "reason": "disabled_by_env"}
+        with _lock:
+            _autopair_last = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **out}
+        log.warning("ip_recovery: auto-pair suppressed (JAMBOREE_AUTOPAIR=0)")
+        return out
+
+    now = time.time()
+    with _lock:
+        since = now - _autopair_last_ts
+        if _autopair_last_ts and since < _AUTOPAIR_COOLDOWN_S:
+            out = {"triggered": False, "reason": "cooldown",
+                   "retry_in_s": round(_AUTOPAIR_COOLDOWN_S - since, 1)}
+            _autopair_last = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **out}
+            return out
+        _autopair_last_ts = now
+
+    try:
+        import sgs_autopair
+    except Exception as exc:
+        out = {"triggered": False, "reason": f"import_failed: {exc}"}
+        with _lock:
+            _autopair_last = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **out}
+        log.error("ip_recovery: cannot auto-pair, sgs_autopair unavailable: %s", exc)
+        return out
+
+    alias = str((_CFG or {}).get("stb_alias", "found1"))
+    log.error(
+        "ip_recovery: %s IS a receiver but rejects our commands (%s) — this is a "
+        "PAIRING problem, not an IP problem. Launching auto-pair for alias %s.",
+        ip or "stored IP", reason, alias,
+    )
+    started = False
+    try:
+        started = bool(sgs_autopair.auto_pair_async(alias))
+    except Exception as exc:
+        log.exception("ip_recovery: auto-pair launch failed")
+        out = {"triggered": False, "reason": f"launch_failed: {exc}", "alias": alias}
+        with _lock:
+            _autopair_last = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **out}
+        return out
+
+    out = {"triggered": started, "alias": alias,
+           "reason": reason if started else "already_running"}
+    with _lock:
+        _autopair_last = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), **out}
+    return out
+
+
 def note_sgs_failure(exc: Optional[BaseException] = None) -> None:
     """Increment consecutive-failure counter; trigger recovery when threshold hit."""
-    global _consecutive_sgs_failures
+    global _consecutive_sgs_failures, _last_sgs_failure
+    verdict = classify_sgs_failure(exc)
     with _lock:
         _consecutive_sgs_failures += 1
         count = _consecutive_sgs_failures
-    log.debug("ip_recovery: SGS failure #%d (exc=%s)", count, exc)
-    if count >= _SGS_FAIL_THRESHOLD:
-        if is_sgs_dead_but_video_alive(exc):
-            maybe_trigger_recovery()
+        _last_sgs_failure = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "kind": verdict["kind"],
+            "dead": verdict["dead"],
+            "threshold": verdict["threshold"],
+            "error": (str(exc) or "")[:400],
+        }
+    log.debug(
+        "ip_recovery: SGS failure #%d (kind=%s threshold=%d) (exc=%s)",
+        count, verdict["kind"], verdict["threshold"], exc,
+    )
+
+    if count < verdict["threshold"]:
+        return
+
+    # An auth-shaped failure is ambiguous between "unpaired receiver" and
+    # "wrong host entirely".  Fingerprint the stored IP once so the log says
+    # which it is, and so recovery is not launched against a receiver that is
+    # simply waiting to be paired.
+    if verdict["kind"] == "auth":
+        ident = verify_stored_ip_identity()
+        if ident.get("is_stb") is True:
+            # Credentials problem: pair, do not hunt for a new IP.
+            _maybe_trigger_autopair(
+                str(_last_sgs_failure.get("kind") or "auth"),
+                str(ident.get("ip") or ""),
+            )
+            return
+        if ident.get("is_stb") is False:
+            log.error(
+                "ip_recovery: stored IP %s belongs to another host (%s) - "
+                "treating as an IP change and starting recovery",
+                ident.get("ip"), ident.get("reason"),
+            )
+
+    if is_sgs_dead_but_video_alive(exc):
+        maybe_trigger_recovery()
 
 
 def note_sgs_success() -> None:
@@ -253,12 +547,22 @@ def maybe_trigger_recovery() -> bool:
 
 def get_recovery_status() -> Dict[str, Any]:
     with _lock:
-        return {
+        payload = {
             "active": _recovery_active,
             "last_result": dict(_last_result),
             "consecutive_sgs_failures": _consecutive_sgs_failures,
             "last_attempt_ago_s": round(time.time() - _last_attempt_ts, 1) if _last_attempt_ts else None,
+            # v39 diagnostics
+            "last_sgs_failure": dict(_last_sgs_failure),
+            "known_stb_mac": _known_stb_mac,
+            "autopair": dict(_autopair_last),
+            "thresholds": {
+                "transport": _SGS_FAIL_THRESHOLD,
+                "auth": _SGS_FAIL_THRESHOLD_AUTH,
+            },
         }
+    payload["rf_ready"] = rf_ready()
+    return payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +643,92 @@ def _screen_contains(frame: np.ndarray, keywords: list) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 #  RF4CE navigation helpers
 # ─────────────────────────────────────────────────────────────────────────────
+#  This section was an empty stub: the module documented an "RF4CE reliability"
+#  strategy but contained no RF code at all, and `_sgs_press()` -- despite the
+#  name being used for "fallback" navigation -- called `ctl.handle_auto_remote()`,
+#  which dispatches on base.txt's protocol field and therefore went straight
+#  back out over SGS.  When SGS was down there was literally no way to move the
+#  on-screen cursor, so the OCR strategy could never work.
+#
+#  RF4CE is the right transport for recovery: it is a local serial link to the
+#  Arduino/RF dongle and is completely independent of the STB's IP address.
+
+def rf_ready() -> bool:
+    """True when the RF4CE serial line for the configured alias is usable."""
+    if _ctl is None or _CFG is None:
+        return False
+    alias = str(_CFG.get("stb_alias", "found1"))
+    try:
+        return bool(_ctl.rf_ready(alias))
+    except AttributeError:
+        # Older Controller without transport introspection
+        try:
+            from jamboree.serial_bridge import rf_available
+            return bool(rf_available(alias))
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _rf_press(button: str, delay_ms: int, settle_s: float = KEY_SETTLE_S) -> bool:
+    """Send one button over RF4CE only -- never over SGS.
+
+    ``force="rf"`` makes the controller bypass its protocol dispatch, which is
+    essential here: the whole point is to drive the box while SGS is broken.
+    """
+    if _ctl is None or _CFG is None:
+        return False
+    alias = str(_CFG.get("stb_alias", "found1"))
+    # NB: CFG["remote"] is the transport hint "sgs", not an RF slot number.
+    # The real slot lives in base.txt; force="rf" makes the controller read it.
+    remote = str((_store.get(alias) or {}).get("remote") or "14") if _store else "14"
+    try:
+        _ctl.handle_auto_remote(remote, alias, button, int(delay_ms), force="rf")
+        log.info("ip_recovery: RF press %-6s %4dms (remote=%s)", button, int(delay_ms), remote)
+        time.sleep(settle_s)
+        return True
+    except TypeError:
+        # Controller predates the force= kwarg -- try the explicit RF method.
+        try:
+            _ctl.rf_remote(alias, button, int(delay_ms))
+            time.sleep(settle_s)
+            return True
+        except Exception as exc:
+            log.warning("ip_recovery: RF press %s failed (legacy path): %s", button, exc)
+            return False
+    except Exception as exc:
+        log.warning("ip_recovery: RF press %s failed: %s", button, exc)
+        return False
+
+
+def _rf_press_confirmed(
+    button: str,
+    delay_ms: int,
+    expect_keywords: list,
+    attempts: int = MAX_KEY_ATTEMPTS,
+    settle_s: float = KEY_SETTLE_S,
+) -> bool:
+    """Press over RF and OCR-confirm the expected screen, retrying if it missed.
+
+    RF4CE presses genuinely do get dropped, which is what the module docstring
+    always promised to handle but never implemented.
+    """
+    for attempt in range(1, int(attempts) + 1):
+        if not _rf_press(button, delay_ms, settle_s=settle_s):
+            return False
+        if not expect_keywords:
+            return True
+        if _confirm_screen(expect_keywords):
+            if attempt > 1:
+                log.info("ip_recovery: RF '%s' confirmed on attempt %d", button, attempt)
+            return True
+        log.debug(
+            "ip_recovery: RF '%s' attempt %d/%d did not reach %s - retrying",
+            button, attempt, attempts, expect_keywords[:3],
+        )
+    log.warning("ip_recovery: RF '%s' never confirmed after %d attempts", button, attempts)
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -370,13 +760,31 @@ def _get_stb_mac() -> Optional[str]:
             ["ip", "neigh", "show"],
             capture_output=True, text=True, timeout=5
         )
-        # Strategy 1: match by current stored IP
+        # Strategy 1: match by current stored IP.
+        #
+        # v39: this used to return the MAC unconditionally.  On 2026-08-03 the
+        # STB's DHCP lease had been reassigned to a Jenkins server, so the
+        # "STB MAC" we cached was that server's MAC.  Every later ARP sweep then
+        # rediscovered the same wrong host and recovery could never converge.
+        # We now refuse to adopt a MAC from an IP that positively identifies as
+        # something other than a receiver.
         for line in result.stdout.splitlines():
             if old_ip and old_ip in line and "lladdr" in line:
                 parts = line.split()
                 idx = parts.index("lladdr")
                 mac = parts[idx + 1].lower()
-                log.info("ip_recovery: STB MAC from ARP (ip=%s): %s", old_ip, mac)
+                ident = _probe_device_identity(old_ip)
+                if ident.get("is_stb") is False:
+                    log.error(
+                        "ip_recovery: refusing to cache MAC %s from %s — that host "
+                        "is not a receiver (%s, server=%r). base.txt is stale.",
+                        mac, old_ip, ident.get("reason"), ident.get("server"),
+                    )
+                    break   # fall through to the cached / OUI strategies
+                log.info(
+                    "ip_recovery: STB MAC from ARP (ip=%s): %s (identity=%s)",
+                    old_ip, mac, ident.get("is_stb"),
+                )
                 return mac
 
         # Strategy 2: return cached MAC from last healthy SGS call
@@ -516,11 +924,23 @@ def _detect_subnet() -> tuple:
 
 
 def _find_stb_ip_by_arp() -> Optional[str]:
-    """Top-level ARP discovery: get MAC, detect subnet, sweep, return new IP."""
+    """Top-level ARP discovery: get MAC, detect subnet, sweep, return new IP.
+
+    v39 changes:
+      * a candidate IP is fingerprinted before being accepted, so the sweep can
+        no longer "find" a CI server that happens to hold the old lease;
+      * the currently stored IP is rejected outright when it identifies as a
+        non-receiver, otherwise a poisoned MAC cache makes the sweep converge
+        straight back onto the wrong host.
+    """
     mac = _get_stb_mac()
     if not mac:
         log.warning("ip_recovery: MAC not in ARP cache — doing cold sweep")
         # Still try; sweep will populate ARP from scratch
+
+    stored_ip = ""
+    if _store is not None and _CFG is not None:
+        stored_ip = ((_store.get(str(_CFG.get("stb_alias", "found1"))) or {}).get("ip") or "")
 
     subnet, iface = _detect_subnet()
 
@@ -528,13 +948,82 @@ def _find_stb_ip_by_arp() -> Optional[str]:
         log.info("ip_recovery: ARP scan attempt %d/%d", attempt, ARP_SCAN_RETRIES)
         new_ip = _arp_scan_for_mac(mac, subnet, iface) if mac else None
         if new_ip:
-            return new_ip
-        # If no MAC, try a wider sweep and look for any Hopper device
-        # by checking the stb's receiver ID via SGS after sweep
+            if new_ip == stored_ip:
+                ident = _probe_device_identity(new_ip)
+                if ident.get("is_stb") is False:
+                    log.error(
+                        "ip_recovery: ARP sweep converged back onto %s, which is not "
+                        "a receiver (%s) — the cached MAC is poisoned, discarding it",
+                        new_ip, ident.get("reason"),
+                    )
+                    global _known_stb_mac
+                    _known_stb_mac = None
+                    mac = None
+                    if attempt < ARP_SCAN_RETRIES:
+                        time.sleep(2.0)
+                    continue
+            ident = _probe_device_identity(new_ip)
+            if ident.get("is_stb") is False:
+                log.warning(
+                    "ip_recovery: ARP candidate %s rejected — not a receiver (%s)",
+                    new_ip, ident.get("reason"),
+                )
+            else:
+                log.info(
+                    "ip_recovery: ARP candidate %s accepted (identity=%s, %s)",
+                    new_ip, ident.get("is_stb"), ident.get("reason"),
+                )
+                return new_ip
+
         if attempt < ARP_SCAN_RETRIES:
             time.sleep(2.0)
 
     return None
+
+
+def find_stb_ip_by_sgs_probe(max_hosts: int = 512) -> Optional[str]:
+    """Locate the receiver by probing the SGS port across the local subnet.
+
+    Complements the ARP strategy: it needs no prior knowledge of the STB's MAC,
+    which matters when the cache has been poisoned or the box has never been
+    seen.  Only hosts that answer with an SGS result envelope (or the
+    receiver's digest challenge) are accepted.
+    """
+    import concurrent.futures
+    import ipaddress as _ipa
+
+    subnet, iface = _detect_subnet()
+    candidates: list = []
+    try:
+        net = _ipa.ip_network(subnet, strict=False)
+        candidates = [str(h) for h in net.hosts()][:int(max_hosts)]
+    except Exception as exc:
+        log.warning("ip_recovery: SGS probe sweep - bad subnet %r: %s", subnet, exc)
+        return None
+
+    log.info(
+        "ip_recovery: SGS identity sweep of %s (%d hosts, iface=%s)…",
+        subnet, len(candidates), iface,
+    )
+    found: list = []
+
+    def _check(ip: str) -> None:
+        if _probe_device_identity(ip, timeout=1.5).get("is_stb") is True:
+            found.append(ip)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=ARP_SCAN_WORKERS) as pool:
+        list(pool.map(_check, candidates))
+
+    if not found:
+        log.warning("ip_recovery: SGS identity sweep found no receiver on %s", subnet)
+        return None
+    if len(found) > 1:
+        log.warning(
+            "ip_recovery: SGS identity sweep found %d receivers %s — using the first",
+            len(found), found[:5],
+        )
+    log.info("ip_recovery: SGS identity sweep located receiver at %s", found[0])
+    return found[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -562,7 +1051,13 @@ def _sgs_press(button: str, delay_ms: int, ip_override: Optional[str] = None,
         _store.save({"stbs": all_stbs}); _store.reload()
 
     try:
-        _ctl.handle_auto_remote(remote, alias, button, delay_ms)
+        # force="sgs": the controller would otherwise silently fall back to RF,
+        # which here would be a lie -- this helper exists to test whether an SGS
+        # candidate IP actually works.
+        try:
+            _ctl.handle_auto_remote(remote, alias, button, delay_ms, force="sgs")
+        except TypeError:
+            _ctl.handle_auto_remote(remote, alias, button, delay_ms)
         time.sleep(settle_s)
         return True
     except Exception as exc:
@@ -620,26 +1115,46 @@ def _navigate_to_network_screen(ip_override: Optional[str] = None) -> bool:
     """
     log.info("ip_recovery: OCR fallback — navigating to network screen")
 
-    # ── Primary path: backup HTTP controller (IP-independent) ───────────
+    _MENU_KW = ["settings", "network", "diagnostics", "system", "info"]
+    _NET_KW  = ["network", "ip address", "ip:", "ethernet", "wifi", "internet"]
+
+    # ── Primary path: RF4CE over the local serial line (v39) ─────────────
+    # RF is preferred over everything else because it needs neither the STB's
+    # IP nor any other host on the network.  This is the path that was missing:
+    # previously "fallback" navigation still went out over SGS, so a dead SGS
+    # link meant no navigation at all.
+    if rf_ready():
+        log.info("ip_recovery: trying RF4CE navigation (local serial, ip-independent)")
+        if _rf_press_confirmed("home", HOME_HOLD_MS, _MENU_KW):
+            if _rf_press_confirmed("2", DIGIT_PRESS_MS, _NET_KW):
+                log.info("ip_recovery: network screen reached via RF4CE OK")
+                return True
+            log.warning("ip_recovery: RF4CE reached the menu but not the network screen")
+        else:
+            log.warning("ip_recovery: RF4CE HOME hold did not reach the system menu")
+    else:
+        log.warning(
+            "ip_recovery: RF4CE not available (no serial worker for alias %s) — "
+            "skipping the preferred navigation path",
+            str((_CFG or {}).get("stb_alias", "found1")),
+        )
+
+    # ── Secondary path: backup HTTP controller (IP-independent) ──────────
     log.info("ip_recovery: trying backup-HTTP navigation (ip-independent)")
     home_ok = _backup_http_press("home", HOME_HOLD_MS, settle_s=2.5)
     if home_ok:
-        if not _confirm_screen(["settings", "network", "diagnostics", "system", "info"]):
+        if not _confirm_screen(_MENU_KW):
             log.warning("ip_recovery: HOME overlay not confirmed via backup-HTTP, continuing anyway")
         digit_ok = _backup_http_press("2", DIGIT_PRESS_MS, settle_s=2.5)
         if digit_ok:
-            reached = _confirm_screen(
-                ["network", "ip address", "ip:", "ethernet", "wifi", "internet"],
-                settle_extra_s=0.5,
-            )
-            if reached:
+            if _confirm_screen(_NET_KW, settle_extra_s=0.5):
                 log.info("ip_recovery: network screen reached via backup-HTTP OK")
                 return True
             log.warning("ip_recovery: backup-HTTP sent but network screen not confirmed by OCR")
 
-    # ── Fallback path: SGS (requires a working IP) ───────────────────────
+    # ── Last resort: SGS (requires a working IP, so usually pointless here) ──
     log.warning(
-        "ip_recovery: backup-HTTP path failed — falling back to SGS (ip=%s)",
+        "ip_recovery: RF and backup-HTTP both failed — last-resort SGS (ip=%s)",
         ip_override or "stored",
     )
     if not _sgs_press("home", HOME_HOLD_MS, ip_override=ip_override, settle_s=2.5):
@@ -694,18 +1209,34 @@ def _read_ip_from_screen() -> Optional[str]:
 #  Shared helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _update_base_txt(new_ip: str) -> bool:
-    """Write the new IP to base.txt and hot-reload the store."""
+def _update_base_txt(new_ip: str, **extra_fields: Any) -> bool:
+    """Write the new IP to base.txt and hot-reload the store.
+
+    v39: uses ``store.update_stb()``, which updates/adds individual fields
+    atomically.  The previous implementation rebuilt the whole document and
+    called ``store.save({"stbs": ...})``, which replaced base.txt wholesale and
+    dropped every top-level key -- including anything the pairing flow had
+    written outside the STB entry.
+    """
     if _store is None or _CFG is None:
         return False
     alias = str(_CFG.get("stb_alias", "found1"))
+    fields: Dict[str, Any] = {"ip": new_ip}
+    fields.update(extra_fields)
     try:
-        all_stbs = dict(_store.all())
-        all_stbs[alias] = dict(all_stbs[alias])
-        all_stbs[alias]["ip"] = new_ip
-        _store.save({"stbs": all_stbs})
+        if hasattr(_store, "update_stb"):
+            _store.update_stb(alias, fields)
+        else:                                   # legacy store -- merge by hand
+            all_stbs = dict(_store.all())
+            entry = dict(all_stbs.get(alias, {}))
+            entry.update(fields)
+            all_stbs[alias] = entry
+            _store.save({"stbs": all_stbs})
         _store.reload()
-        log.info("ip_recovery: base.txt updated — %s IP is now %s", alias, new_ip)
+        log.info(
+            "ip_recovery: base.txt updated — %s %s (credentials and other fields preserved)",
+            alias, ", ".join(f"{k}={v}" for k, v in fields.items()),
+        )
         return True
     except Exception as exc:
         log.error("ip_recovery: base.txt update failed: %s", exc)
@@ -720,7 +1251,13 @@ def _verify_sgs_with_new_ip() -> bool:
     remote = str(_CFG.get("remote", "14"))
     delay  = int(_CFG.get("default_delay_ms", 120))
     try:
-        _ctl.handle_auto_remote(remote, alias, "info", delay)
+        # force="sgs" is critical: with the v39 RF fallback in place, a plain
+        # call would succeed over RF even though SGS is still broken, and
+        # recovery would declare victory with a wrong IP in base.txt.
+        try:
+            _ctl.handle_auto_remote(remote, alias, "info", delay, force="sgs")
+        except TypeError:
+            _ctl.handle_auto_remote(remote, alias, "info", delay)
         log.info("ip_recovery: SGS verify OK")
         return True
     except Exception as exc:
@@ -734,10 +1271,13 @@ def _escape_to_live_tv(ip_override: Optional[str] = None) -> None:
     Tries backup HTTP first (IP-independent), then falls back to SGS.
     Multiple presses because the STB may be several menus deep.
     """
+    use_rf = rf_ready()
     for btn, ms in [("back", 120), ("back", 120), ("home", 120), ("live", 120)]:
-        sent = _backup_http_press(btn, ms, settle_s=1.2)
-        if not sent:
-            _sgs_press(btn, ms, ip_override=ip_override, settle_s=1.2)
+        if use_rf and _rf_press(btn, ms, settle_s=1.2):
+            continue
+        if _backup_http_press(btn, ms, settle_s=1.2):
+            continue
+        _sgs_press(btn, ms, ip_override=ip_override, settle_s=1.2)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -770,6 +1310,15 @@ def _recovery_worker() -> None:
                 result["strategy"] = "arp_scan"
                 log.info("ip_recovery: ARP scan found new IP: %s", new_ip)
             else:
+                # ── Strategy 1b: SGS identity sweep (v39) ───────────────────
+                # No MAC needed, and immune to a poisoned MAC cache.
+                log.info("ip_recovery: Strategy 1b — SGS identity sweep")
+                new_ip = find_stb_ip_by_sgs_probe()
+                if new_ip:
+                    result["strategy"] = "sgs_identity_sweep"
+                    log.info("ip_recovery: identity sweep found receiver at %s", new_ip)
+
+            if not new_ip:
                 # ── Strategy 2: OCR via SGS navigation ──────────────────────
                 log.info("ip_recovery: Strategy 2 — SGS screen navigation + OCR")
                 # We need a working IP candidate for SGS. Try a broad ARP sweep

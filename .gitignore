@@ -100,3 +100,11 @@ learned_sequences.json
 CONTEXT_QA_REPORT_V11.json
 models/vlm_runtime_state.json
 vlm_jobs/
+
+# Timestamped in-place edit backups (v39 tooling) - never commit these
+*.bak
+*.bak-*
+*.bak_*
+*.before-*
+*.broken-*
+base.txt.lock
