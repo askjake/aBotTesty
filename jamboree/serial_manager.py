@@ -207,6 +207,19 @@ class SerialManager:
             return False
         return w.write(data)
 
+    def has_port(self, alias_or_com: str) -> bool:
+        """True when a live worker exists for this alias/COM.
+
+        Used by the controller to decide whether an RF fallback is even
+        possible before it abandons a failed SGS command.
+        """
+        return self._resolve_worker(alias_or_com) is not None
+
+    def port_for(self, alias_or_com: str):
+        """Return the COM device backing an alias, or ``None``."""
+        with self._lock:
+            return self._alias_to_port.get(alias_or_com)
+
     def stop_all(self):
         with self._lock:
             for w in self._port_workers.values():
