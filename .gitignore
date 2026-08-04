@@ -72,14 +72,21 @@ tmp/
 temp/
 *.tmp
 
-# Archives
+# Archives / installers / large binaries
 *.tar.gz
 *.zip
 *.bundle
-*.jpg
-*.jpg
+*.run
+*.exe
 crawler_data/
 .venv/
+
+# Images
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
 
 # Large ML model binary files (use Git LFS or external storage instead)
 *.safetensors
